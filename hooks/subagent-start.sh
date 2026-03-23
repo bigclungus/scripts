@@ -40,7 +40,7 @@ for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
   [ -f "$f" ] || continue
   FILE_TS=$(jq -r '.ts // 0' "$f")
   AGE=$(( NOW_TS - FILE_TS ))
-  if [ "$AGE" -le 10 ]; then
+  if [ "$AGE" -le 30 ]; then
     PENDING_TITLE=$(jq -r '.title // ""' "$f")
     PENDING_PROMPT=$(jq -r '.prompt // ""' "$f")
     BEST_PENDING="$f"
