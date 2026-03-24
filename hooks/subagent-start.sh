@@ -32,6 +32,9 @@ BEST_PENDING=""
 SUBAGENT_TYPE="unknown"
 DISCORD_MESSAGE_ID="null"
 DISCORD_USER="null"
+RUN_IN_BG="false"
+ISOLATION=""
+MODEL=""
 
 for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
   [ -f "$f" ] || continue
@@ -42,6 +45,9 @@ for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
     SUBAGENT_TYPE=$(jq -r '.subagent_type // "unknown"' "$f")
     DISCORD_MESSAGE_ID=$(jq -r 'if .discord_message_id == null then "null" else (.discord_message_id | @json) end' "$f")
     DISCORD_USER=$(jq -r 'if .discord_user == null then "null" else (.discord_user | @json) end' "$f")
+    RUN_IN_BG=$(jq -r '.run_in_background // false' "$f")
+    ISOLATION=$(jq -r '.isolation // empty' "$f")
+    MODEL=$(jq -r '.model // empty' "$f")
     BEST_PENDING="$f"
   fi
 done
@@ -67,6 +73,9 @@ jq -n \
   --arg session_id "$SESSION_ID" \
   --argjson discord_message_id "$DISCORD_MESSAGE_ID" \
   --argjson discord_user "$DISCORD_USER" \
+  --argjson run_in_background "$RUN_IN_BG" \
+  --arg isolation "${ISOLATION:-}" \
+  --arg model "${MODEL:-}" \
   --arg ts "$TIMESTAMP" \
   '{
     id: $id,
@@ -76,6 +85,9 @@ jq -n \
     session_id: $session_id,
     discord_message_id: $discord_message_id,
     discord_user: $discord_user,
+    run_in_background: $run_in_background,
+    isolation: (if $isolation == "" then null else $isolation end),
+    model: (if $model == "" then null else $model end),
     log: [
       {
         ts: $ts,

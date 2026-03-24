@@ -32,6 +32,9 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
 PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // ""')
 DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // ""')
 SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "unknown"')
+RUN_IN_BACKGROUND=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false')
+ISOLATION=$(echo "$INPUT" | jq -r '.tool_input.isolation // empty')
+MODEL=$(echo "$INPUT" | jq -r '.tool_input.model // empty')
 
 # Extract optional discord context from tool_input first,
 # then fall back to /tmp/bc-last-discord-context.json (written by post-discord-reply.sh)
@@ -72,6 +75,9 @@ jq -n \
   --argjson ts "$(date +%s)" \
   --arg discord_message_id "${DISCORD_MESSAGE_ID:-}" \
   --arg discord_user "${DISCORD_USER:-}" \
+  --argjson run_in_background "$RUN_IN_BACKGROUND" \
+  --arg isolation "${ISOLATION:-}" \
+  --arg model "${MODEL:-}" \
   '{
     title: $title,
     prompt: $prompt,
@@ -79,7 +85,10 @@ jq -n \
     session_id: $session_id,
     ts: $ts,
     discord_message_id: (if $discord_message_id == "" then null else $discord_message_id end),
-    discord_user: (if $discord_user == "" then null else $discord_user end)
+    discord_user: (if $discord_user == "" then null else $discord_user end),
+    run_in_background: $run_in_background,
+    isolation: (if $isolation == "" then null else $isolation end),
+    model: (if $model == "" then null else $model end)
   }' > "$PENDING_FILE"
 
 echo "pre-agent-spawn: saved pending prompt for session $SESSION_ID" >&2
