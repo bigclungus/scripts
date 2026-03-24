@@ -72,3 +72,28 @@ if [ "$CHANGED" -eq 1 ]; then
 fi
 
 echo "watchdog: $STALE_COUNT task(s) marked stale"
+
+# Check for stalled congress sessions (running > 2 hours)
+STALLED_CONGRESS=$(temporal workflow list \
+  --query 'WorkflowType="CongressWorkflow" AND ExecutionStatus="Running"' \
+  --address localhost:7233 \
+  --fields WorkflowId,StartTime \
+  --output json 2>/dev/null | python3 -c "
+import json, sys, datetime
+try:
+    workflows = json.load(sys.stdin)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stalled = []
+    for wf in workflows:
+        start = datetime.datetime.fromisoformat(wf.get('startTime', '').replace('Z', '+00:00'))
+        age_hours = (now - start).total_seconds() / 3600
+        if age_hours > 2:
+            stalled.append(f\"{wf['workflowId']} ({age_hours:.1f}h)\")
+    print(' '.join(stalled))
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [ -n "$STALLED_CONGRESS" ]; then
+    echo "STALLED_CONGRESS: $STALLED_CONGRESS"
+fi
