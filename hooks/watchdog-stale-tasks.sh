@@ -73,27 +73,58 @@ fi
 
 echo "watchdog: $STALE_COUNT task(s) marked stale"
 
-# Check for stalled congress sessions (running > 2 hours)
-STALLED_CONGRESS=$(temporal workflow list \
+# Check for stalled congress sessions (running > 2 hours) and terminate them
+temporal workflow list \
   --query 'WorkflowType="CongressWorkflow" AND ExecutionStatus="Running"' \
   --address localhost:7233 \
   --fields WorkflowId,StartTime \
   --output json 2>/dev/null | python3 -c "
-import json, sys, datetime
+import json, sys, datetime, subprocess
+
 try:
     workflows = json.load(sys.stdin)
     now = datetime.datetime.now(datetime.timezone.utc)
-    stalled = []
     for wf in workflows:
-        start = datetime.datetime.fromisoformat(wf.get('startTime', '').replace('Z', '+00:00'))
+        wf_id = wf.get('workflowId', '')
+        start_str = wf.get('startTime', '')
+        if not start_str:
+            continue
+        start = datetime.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
         age_hours = (now - start).total_seconds() / 3600
         if age_hours > 2:
-            stalled.append(f\"{wf['workflowId']} ({age_hours:.1f}h)\")
-    print(' '.join(stalled))
-except Exception:
-    pass
-" 2>/dev/null)
+            print(f'Terminating stalled congress {wf_id} (running {age_hours:.1f}h)', flush=True)
+            subprocess.run([
+                'temporal', 'workflow', 'terminate',
+                '--workflow-id', wf_id,
+                '--address', 'localhost:7233',
+                '--reason', f'Stalled: running {age_hours:.1f}h, terminated by watchdog'
+            ], capture_output=True)
+except Exception as e:
+    print(f'Congress stall check error: {e}', file=sys.stderr)
+" 2>/dev/null
 
-if [ -n "$STALLED_CONGRESS" ]; then
-    echo "STALLED_CONGRESS: $STALLED_CONGRESS"
-fi
+# Also mark session JSONs for terminated congresses
+python3 - <<'PYEOF'
+import json, os, glob, datetime
+
+sessions_dir = '/home/clungus/work/hello-world/sessions'
+now = datetime.datetime.now(datetime.timezone.utc)
+
+for path in glob.glob(f'{sessions_dir}/congress-*.json'):
+    try:
+        d = json.load(open(path))
+        if d.get('status') != 'deliberating':
+            continue
+        started = d.get('started_at', '')
+        if not started:
+            continue
+        start = datetime.datetime.fromisoformat(started.replace('Z', '+00:00'))
+        age_hours = (now - start).total_seconds() / 3600
+        if age_hours > 2:
+            d['status'] = 'failed'
+            d['failure_reason'] = f'Terminated by watchdog: stalled for {age_hours:.1f}h'
+            json.dump(d, open(path, 'w'), indent=2)
+            print(f'Marked stale: {os.path.basename(path)}')
+    except Exception as e:
+        pass
+PYEOF
