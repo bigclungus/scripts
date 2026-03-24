@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 SESSIONS_DIR = Path("/home/clungus/work/hello-world/sessions")
-DIRECTIVES_FILE = Path("/home/clungus/work/claude-config/learned-directives.md")
+DIRECTIVES_FILE = Path("/home/clungus/work/bigclungus-meta/learned-directives.md")
 N_SESSIONS = 5
 
 
@@ -85,7 +85,7 @@ def main():
     print(f"Wrote {len(new_entries)} new directive(s) to {DIRECTIVES_FILE}")
 
     # Commit and push
-    repo = Path("/home/clungus/work/claude-config")
+    repo = Path("/home/clungus/work/bigclungus-meta")
     subprocess.run(["git", "add", "learned-directives.md"], cwd=repo, check=True)
     result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo)
     if result.returncode != 0:
