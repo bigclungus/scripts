@@ -33,9 +33,21 @@ PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // ""')
 DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // ""')
 SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "unknown"')
 
-# Extract optional discord context (will be null if not present)
+# Extract optional discord context from tool_input first,
+# then fall back to /tmp/bc-last-discord-context.json (written by post-discord-reply.sh)
 DISCORD_MESSAGE_ID=$(echo "$INPUT" | jq -r '.tool_input.discord_message_id // empty')
 DISCORD_USER=$(echo "$INPUT" | jq -r '.tool_input.discord_user // empty')
+
+if [ -z "$DISCORD_MESSAGE_ID" ] && [ -f /tmp/bc-last-discord-context.json ]; then
+  # Only use if written within last 120 seconds (i.e. recent reply before this spawn)
+  CTX_TS=$(jq -r '.ts // empty' /tmp/bc-last-discord-context.json 2>/dev/null || true)
+  if [ -n "$CTX_TS" ]; then
+    CTX_AGE=$(( $(date +%s) - $(date -d "$CTX_TS" +%s 2>/dev/null || echo 0) ))
+    if [ "$CTX_AGE" -le 120 ]; then
+      DISCORD_MESSAGE_ID=$(jq -r '.message_id // empty' /tmp/bc-last-discord-context.json)
+    fi
+  fi
+fi
 
 # Use description as title if available, else first 80 chars of prompt
 if [ -n "$DESCRIPTION" ]; then
