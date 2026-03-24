@@ -59,10 +59,18 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 ISSUE_NUMBER=$(jq -r '.issue_number' "$STATE_FILE")
+ISSUE_NODE_ID=$(jq -r '.issue_node_id // empty' "$STATE_FILE")
 ITEM_ID=$(jq -r '.item_id' "$STATE_FILE")
 ISSUE_URL=$(jq -r '.issue_url' "$STATE_FILE")
 STARTED=$(jq -r '.started' "$STATE_FILE")
 AGENT_TYPE=$(jq -r '.agent_type' "$STATE_FILE")
+
+# If node_id wasn't stored (legacy state files), fetch it
+if [ -z "$ISSUE_NODE_ID" ] || [ "$ISSUE_NODE_ID" = "null" ]; then
+  ISSUE_NODE_ID=$(gh issue view "$ISSUE_NUMBER" \
+    --repo BigClungus/bigclungus-meta \
+    --json nodeId --jq '.nodeId' 2>/dev/null || true)
+fi
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -89,19 +97,45 @@ gh issue comment "$ISSUE_NUMBER" \
   --repo BigClungus/bigclungus-meta \
   --body "$COMMENT" 2>/dev/null || true
 
-# Set project item to Done
-if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
-  gh project item-edit \
-    --project-id PVT_kwHOEBqF8c4BSf-9 \
-    --id "$ITEM_ID" \
-    --field-id PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
-    --single-select-option-id 98236657 2>/dev/null || true
+# Batch: close issue + set project status to Done in a single GraphQL call
+if [ -n "$ISSUE_NODE_ID" ] && [ "$ISSUE_NODE_ID" != "null" ] \
+   && [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+  gh api graphql \
+    -f query='mutation($issueId:ID!, $projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+      closeIssue(input:{issueId:$issueId, stateReason:COMPLETED}) {
+        issue { id }
+      }
+      updateProjectV2ItemFieldValue(input:{projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{singleSelectOptionId:$optionId}}) {
+        projectV2Item { id }
+      }
+    }' \
+    -f issueId="$ISSUE_NODE_ID" \
+    -f projectId=PVT_kwHOEBqF8c4BSf-9 \
+    -f itemId="$ITEM_ID" \
+    -f fieldId=PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
+    -f optionId=98236657 2>/dev/null || {
+      # Fallback: close and update separately if batch fails
+      gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
+      gh project item-edit \
+        --project-id PVT_kwHOEBqF8c4BSf-9 \
+        --id "$ITEM_ID" \
+        --field-id PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
+        --single-select-option-id 98236657 2>/dev/null || true
+    }
+elif [ -n "$ISSUE_NODE_ID" ] && [ "$ISSUE_NODE_ID" != "null" ]; then
+  # No item_id — just close the issue via GraphQL
+  gh api graphql \
+    -f query='mutation($issueId:ID!) {
+      closeIssue(input:{issueId:$issueId, stateReason:COMPLETED}) {
+        issue { id }
+      }
+    }' \
+    -f issueId="$ISSUE_NODE_ID" 2>/dev/null || \
+    gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
+else
+  # No node_id available — fall back to gh CLI
+  gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
 fi
-
-# Close the issue
-gh issue close "$ISSUE_NUMBER" \
-  --repo BigClungus/bigclungus-meta \
-  --comment "Subagent finished." 2>/dev/null || true
 
 # Clean up state file
 rm -f "$STATE_FILE"

@@ -111,42 +111,60 @@ BODY="${BODY}
 
 _Auto-created by BigClungus subagent tracker hook._"
 
-# Create GitHub issue
-ISSUE_URL=$(gh issue create \
+# Create GitHub issue — capture nodeId and url in one call
+ISSUE_JSON=$(gh issue create \
   --repo BigClungus/bigclungus-meta \
   --title "$TITLE" \
   --body "$BODY" \
-  --label "automated,subagent" 2>/dev/null)
+  --label "automated,subagent" \
+  --json nodeId,url 2>/dev/null)
+
+ISSUE_URL=$(echo "$ISSUE_JSON" | jq -r '.url // empty')
+ISSUE_NODE_ID=$(echo "$ISSUE_JSON" | jq -r '.nodeId // empty')
 
 if [ -z "$ISSUE_URL" ]; then
   echo "subagent-start: failed to create issue for $AGENT_ID" >&2
   exit 0
 fi
 
-# Add to GitHub Project
-ITEM_JSON=$(gh project item-add 1 --owner BigClungus --url "$ISSUE_URL" --format json 2>/dev/null)
-ITEM_ID=$(echo "$ITEM_JSON" | jq -r '.id // empty')
-
-if [ -n "$ITEM_ID" ]; then
-  # Set status to "In Progress"
-  gh project item-edit \
-    --project-id PVT_kwHOEBqF8c4BSf-9 \
-    --id "$ITEM_ID" \
-    --field-id PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
-    --single-select-option-id 47fc9ee4 2>/dev/null || true
-fi
-
 ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oP '\d+$')
+
+# Add issue to GitHub Project via direct GraphQL (avoids gh project wrapper overhead)
+ITEM_ID=$(gh api graphql \
+  -f query='mutation($projectId:ID!, $issueId:ID!) {
+    addProjectV2ItemById(input:{projectId:$projectId, contentId:$issueId}) {
+      item { id }
+    }
+  }' \
+  -f projectId=PVT_kwHOEBqF8c4BSf-9 \
+  -f issueId="$ISSUE_NODE_ID" \
+  --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null || true)
+
+if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+  # Set status to "In Progress"
+  gh api graphql \
+    -f query='mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+      updateProjectV2ItemFieldValue(input:{projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{singleSelectOptionId:$optionId}}) {
+        projectV2Item { id }
+      }
+    }' \
+    -f projectId=PVT_kwHOEBqF8c4BSf-9 \
+    -f itemId="$ITEM_ID" \
+    -f fieldId=PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
+    -f optionId=47fc9ee4 2>/dev/null || true
+fi
 
 # Persist state for SubagentStop
 jq -n \
   --arg issue_number "$ISSUE_NUMBER" \
+  --arg issue_node_id "${ISSUE_NODE_ID:-}" \
   --arg item_id "${ITEM_ID:-}" \
   --arg issue_url "$ISSUE_URL" \
   --arg agent_type "$AGENT_TYPE" \
   --arg started "$TIMESTAMP" \
   '{
     issue_number: ($issue_number | tonumber),
+    issue_node_id: $issue_node_id,
     item_id: $item_id,
     issue_url: $issue_url,
     agent_type: $agent_type,
