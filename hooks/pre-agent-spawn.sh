@@ -6,19 +6,14 @@
 # Strategy: write the prompt to /tmp/bc-pending-agent-prompt keyed by session+timestamp,
 # then SubagentStart picks it up (matching on recency). This is a best-effort association.
 #
-# Alternatively (and more cleanly): use updatedInput to INJECT a unique tracking ID
-# into the subagent's prompt, which the subagent will include in any gh issue it creates.
-# That approach requires the subagent to cooperate (CLAUDE.md instruction).
-#
-# This hook does the simpler thing: saves the prompt so SubagentStart can use it
-# as the issue title instead of the generic "agent_type + agent_id" title.
-#
 # Input JSON fields:
 #   session_id      — current session
 #   tool_name       — "Agent"
 #   tool_input.prompt      — the prompt being sent to the subagent
 #   tool_input.description — short description if provided
 #   tool_input.subagent_type — e.g. "Explore"
+#   tool_input.discord_message_id — triggering Discord message ID (may be absent)
+#   tool_input.discord_user       — triggering Discord user (may be absent)
 #   hook_event_name — "PreToolUse"
 #   agent_id        — present if THIS hook fires inside a subagent
 
@@ -37,6 +32,10 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
 PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // ""')
 DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // ""')
 SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "unknown"')
+
+# Extract optional discord context (will be null if not present)
+DISCORD_MESSAGE_ID=$(echo "$INPUT" | jq -r '.tool_input.discord_message_id // empty')
+DISCORD_USER=$(echo "$INPUT" | jq -r '.tool_input.discord_user // empty')
 
 # Use description as title if available, else first 80 chars of prompt
 if [ -n "$DESCRIPTION" ]; then
@@ -59,12 +58,16 @@ jq -n \
   --arg subagent_type "$SUBAGENT_TYPE" \
   --arg session_id "$SESSION_ID" \
   --argjson ts "$(date +%s)" \
+  --arg discord_message_id "${DISCORD_MESSAGE_ID:-}" \
+  --arg discord_user "${DISCORD_USER:-}" \
   '{
     title: $title,
     prompt: $prompt,
     subagent_type: $subagent_type,
     session_id: $session_id,
-    ts: $ts
+    ts: $ts,
+    discord_message_id: (if $discord_message_id == "" then null else $discord_message_id end),
+    discord_user: (if $discord_user == "" then null else $discord_user end)
   }' > "$PENDING_FILE"
 
 echo "pre-agent-spawn: saved pending prompt for session $SESSION_ID" >&2

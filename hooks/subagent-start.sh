@@ -1,7 +1,7 @@
 #!/bin/bash
 # Hook: SubagentStart
 # Fires when a subagent is spawned.
-# Appends a JSON line to /tmp/bc-session-log.jsonl — no GitHub API calls at start time.
+# Creates a task JSON file in bigclungus-meta/tasks/ and async git commits it.
 #
 # Input JSON (stdin) fields:
 #   agent_id        — unique ID for this subagent
@@ -25,10 +25,13 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 STATE_DIR="/tmp/bc-agents"
 mkdir -p "$STATE_DIR"
 
-# Try to find a pending prompt title (written by pre-agent-spawn.sh)
+# Try to find a pending prompt context (written by pre-agent-spawn.sh)
 NOW_TS=$(date +%s)
 TITLE=""
 BEST_PENDING=""
+SUBAGENT_TYPE="unknown"
+DISCORD_MESSAGE_ID="null"
+DISCORD_USER="null"
 
 for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
   [ -f "$f" ] || continue
@@ -36,6 +39,9 @@ for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
   AGE=$(( NOW_TS - FILE_TS ))
   if [ "$AGE" -le 30 ]; then
     TITLE=$(jq -r '.title // ""' "$f")
+    SUBAGENT_TYPE=$(jq -r '.subagent_type // "unknown"' "$f")
+    DISCORD_MESSAGE_ID=$(jq -r 'if .discord_message_id == null then "null" else (.discord_message_id | @json) end' "$f")
+    DISCORD_USER=$(jq -r 'if .discord_user == null then "null" else (.discord_user | @json) end' "$f")
     BEST_PENDING="$f"
   fi
 done
@@ -46,17 +52,47 @@ if [ -z "$TITLE" ]; then
   TITLE="${AGENT_TYPE} — ${AGENT_ID:0:12}"
 fi
 
-# Append to session log buffer (no GitHub calls)
-LOG_LINE=$(jq -cn \
-  --arg ts "$TIMESTAMP" \
-  --arg agent_id "$AGENT_ID" \
-  --arg agent_type "$AGENT_TYPE" \
-  --arg session_id "$SESSION_ID" \
+# Generate task ID
+TASK_ID="task-$(date +%Y%m%d-%H%M%S)-${AGENT_ID:0:8}"
+
+TASKS_DIR="/home/clungus/work/bigclungus-meta/tasks"
+TASK_FILE="$TASKS_DIR/${TASK_ID}.json"
+
+# Write task JSON file
+jq -n \
+  --arg id "$TASK_ID" \
   --arg title "$TITLE" \
-  '{ts: $ts, agent_id: $agent_id, agent_type: $agent_type, session_id: $session_id, title: $title, status: "started"}')
+  --arg agent_id "$AGENT_ID" \
+  --arg agent_type "$SUBAGENT_TYPE" \
+  --arg session_id "$SESSION_ID" \
+  --argjson discord_message_id "$DISCORD_MESSAGE_ID" \
+  --argjson discord_user "$DISCORD_USER" \
+  --arg started_at "$TIMESTAMP" \
+  '{
+    id: $id,
+    title: $title,
+    status: "in_progress",
+    agent_id: $agent_id,
+    agent_type: $agent_type,
+    session_id: $session_id,
+    discord_message_id: $discord_message_id,
+    discord_user: $discord_user,
+    started_at: $started_at,
+    finished_at: null,
+    summary: null
+  }' > "$TASK_FILE"
 
-echo "$LOG_LINE" >> /tmp/bc-session-log.jsonl
+# Store task ID in agent state file for subagent-stop.sh to pick up
+jq -n \
+  --arg task_id "$TASK_ID" \
+  --arg agent_id "$AGENT_ID" \
+  --arg session_id "$SESSION_ID" \
+  '{task_id: $task_id, agent_id: $agent_id, session_id: $session_id}' \
+  > "$STATE_DIR/${AGENT_ID}.json"
 
-echo "subagent-start: buffered $AGENT_ID ($AGENT_TYPE) to session log" >&2
+# Async background git commit+push (zero blocking)
+(cd /home/clungus/work/bigclungus-meta && git add tasks/ && git commit -m "task: start $TASK_ID" && git push) &
+
+echo "subagent-start: created task $TASK_ID for agent $AGENT_ID ($AGENT_TYPE)" >&2
 
 exit 0
