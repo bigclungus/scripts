@@ -31,7 +31,7 @@ fi
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
 PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // ""')
 DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // ""')
-SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "unknown"')
+SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // "general-purpose"')
 RUN_IN_BACKGROUND=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false')
 ISOLATION=$(echo "$INPUT" | jq -r '.tool_input.isolation // empty')
 MODEL=$(echo "$INPUT" | jq -r '.tool_input.model // empty')

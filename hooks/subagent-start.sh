@@ -29,7 +29,7 @@ mkdir -p "$STATE_DIR"
 NOW_TS=$(date +%s)
 TITLE=""
 BEST_PENDING=""
-SUBAGENT_TYPE="unknown"
+SUBAGENT_TYPE="general-purpose"
 DISCORD_MESSAGE_ID="null"
 DISCORD_USER="null"
 RUN_IN_BG="false"
@@ -42,7 +42,7 @@ for f in "$STATE_DIR"/pending-"${SESSION_ID}"-*; do
   AGE=$(( NOW_TS - FILE_TS ))
   if [ "$AGE" -le 30 ]; then
     TITLE=$(jq -r '.title // ""' "$f")
-    SUBAGENT_TYPE=$(jq -r '.subagent_type // "unknown"' "$f")
+    SUBAGENT_TYPE=$(jq -r '.subagent_type // "general-purpose"' "$f")
     DISCORD_MESSAGE_ID=$(jq -r 'if .discord_message_id == null then "null" else (.discord_message_id | @json) end' "$f")
     DISCORD_USER=$(jq -r 'if .discord_user == null then "null" else (.discord_user | @json) end' "$f")
     RUN_IN_BG=$(jq -r '.run_in_background // false' "$f")
