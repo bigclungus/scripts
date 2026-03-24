@@ -1,145 +1,138 @@
 #!/bin/bash
 # Hook: SubagentStop
 # Fires when a subagent finishes.
-# Reads state written by subagent-start.sh, updates issue with result summary,
-# sets project item to Done, and closes the issue.
+# Appends a "done" entry to /tmp/bc-session-log.jsonl, then flushes pending
+# buffer entries to a single rolling GitHub issue for the session.
 #
-# Input JSON (stdin) fields relevant to us:
+# Session issue state: /tmp/bc-session-issue.json
+#   Contains: { "issue_number": N, "item_id": "PVTI_..." }
+#
+# On first stop of the session: create issue + add to project (2 API calls total).
+# On subsequent stops: edit existing issue body (1 API call).
+#
+# Input JSON (stdin) fields:
 #   agent_id              — same ID as SubagentStart
 #   agent_type            — agent type
 #   last_assistant_message — final text output of the subagent
 #   hook_event_name       — "SubagentStop"
-#
-# State file: /tmp/bc-agents/<agent_id>.json (written by subagent-start.sh)
 
 set -euo pipefail
 
 INPUT=$(cat)
 
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty')
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "unknown"')
 LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // ""')
 
 if [ -z "$AGENT_ID" ]; then
   exit 0
 fi
 
-# Rate limit check — skip GitHub calls if we've hit the soft limit
-RATELIMIT_FILE="/tmp/bc-gh-ratelimit.json"
-RATELIMIT_MAX=200
-RATELIMIT_WINDOW=3600
-NOW_RL=$(date +%s)
-
-RL_COUNT=0
-RL_WINDOW_START=$NOW_RL
-
-if [ -f "$RATELIMIT_FILE" ]; then
-  RL_COUNT=$(jq -r '.count // 0' "$RATELIMIT_FILE" 2>/dev/null || echo 0)
-  RL_WINDOW_START=$(jq -r '.window_start // 0' "$RATELIMIT_FILE" 2>/dev/null || echo 0)
-  WINDOW_AGE=$(( NOW_RL - RL_WINDOW_START ))
-  if [ "$WINDOW_AGE" -ge "$RATELIMIT_WINDOW" ]; then
-    RL_COUNT=0
-    RL_WINDOW_START=$NOW_RL
-  fi
-fi
-
-if [ "$RL_COUNT" -ge "$RATELIMIT_MAX" ]; then
-  echo "subagent-stop: rate limit reached ($RL_COUNT/$RATELIMIT_MAX in window), skipping GitHub" >&2
-  exit 0
-fi
-
-# Increment counter
-jq -n --argjson count "$((RL_COUNT + 1))" --argjson ws "$RL_WINDOW_START" \
-  '{count: $count, window_start: $ws}' > "$RATELIMIT_FILE"
-
-STATE_FILE="/tmp/bc-agents/${AGENT_ID}.json"
-
-if [ ! -f "$STATE_FILE" ]; then
-  echo "subagent-stop: no state file for $AGENT_ID — skipping" >&2
-  exit 0
-fi
-
-ISSUE_NUMBER=$(jq -r '.issue_number' "$STATE_FILE")
-ISSUE_NODE_ID=$(jq -r '.issue_node_id // empty' "$STATE_FILE")
-ITEM_ID=$(jq -r '.item_id' "$STATE_FILE")
-ISSUE_URL=$(jq -r '.issue_url' "$STATE_FILE")
-STARTED=$(jq -r '.started' "$STATE_FILE")
-AGENT_TYPE=$(jq -r '.agent_type' "$STATE_FILE")
-
-# If node_id wasn't stored (legacy state files), fetch it
-if [ -z "$ISSUE_NODE_ID" ] || [ "$ISSUE_NODE_ID" = "null" ]; then
-  ISSUE_NODE_ID=$(gh issue view "$ISSUE_NUMBER" \
-    --repo BigClungus/bigclungus-meta \
-    --json nodeId --jq '.nodeId' 2>/dev/null || true)
-fi
-
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Truncate last message to 2000 chars to avoid massive issue bodies
-SUMMARY="${LAST_MSG:0:2000}"
-if [ ${#LAST_MSG} -gt 2000 ]; then
-  SUMMARY="${SUMMARY}
-...(truncated)"
+# Truncate summary to avoid massive issue bodies
+SUMMARY="${LAST_MSG:0:500}"
+if [ ${#LAST_MSG} -gt 500 ]; then
+  SUMMARY="${SUMMARY}...(truncated)"
 fi
 
-COMMENT="**Completed**: ${TIMESTAMP}
-**Started**: ${STARTED}
+# Append done entry to session log buffer
+LOG_LINE=$(jq -cn \
+  --arg ts "$TIMESTAMP" \
+  --arg agent_id "$AGENT_ID" \
+  --arg agent_type "$AGENT_TYPE" \
+  --arg summary "$SUMMARY" \
+  '{ts: $ts, agent_id: $agent_id, agent_type: $agent_type, summary: $summary, status: "done"}')
 
-### Final Output
+echo "$LOG_LINE" >> /tmp/bc-session-log.jsonl
 
-\`\`\`
-${SUMMARY}
-\`\`\`
+# Build the issue body from all buffered log entries
+build_issue_body() {
+  local log_file="/tmp/bc-session-log.jsonl"
+  local body="# BigClungus Session Log\n\n_Auto-updated by subagent hooks. One rolling issue per session._\n\n"
+  body+="| Time | Agent | Type | Status | Summary |\n"
+  body+="|------|-------|------|--------|---------|\n"
 
-_Auto-updated by BigClungus subagent tracker hook._"
+  while IFS= read -r line; do
+    local ts agent_id agent_type status summary title
+    ts=$(echo "$line" | jq -r '.ts // ""')
+    agent_id=$(echo "$line" | jq -r '.agent_id // ""')
+    agent_type=$(echo "$line" | jq -r '.agent_type // ""')
+    status=$(echo "$line" | jq -r '.status // ""')
+    summary=$(echo "$line" | jq -r '.summary // (.title // "")' | tr '\n' ' ' | cut -c1-80)
 
-# Post comment with result
-gh issue comment "$ISSUE_NUMBER" \
-  --repo BigClungus/bigclungus-meta \
-  --body "$COMMENT" 2>/dev/null || true
+    body+="| ${ts} | \`${agent_id:0:12}\` | ${agent_type} | ${status} | ${summary} |\n"
+  done < "$log_file"
 
-# Batch: close issue + set project status to Done in a single GraphQL call
-if [ -n "$ISSUE_NODE_ID" ] && [ "$ISSUE_NODE_ID" != "null" ] \
-   && [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
-  gh api graphql \
-    -f query='mutation($issueId:ID!, $projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
-      closeIssue(input:{issueId:$issueId, stateReason:COMPLETED}) {
-        issue { id }
-      }
-      updateProjectV2ItemFieldValue(input:{projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{singleSelectOptionId:$optionId}}) {
-        projectV2Item { id }
-      }
-    }' \
-    -f issueId="$ISSUE_NODE_ID" \
-    -f projectId=PVT_kwHOEBqF8c4BSf-9 \
-    -f itemId="$ITEM_ID" \
-    -f fieldId=PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
-    -f optionId=98236657 2>/dev/null || {
-      # Fallback: close and update separately if batch fails
-      gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
-      gh project item-edit \
-        --project-id PVT_kwHOEBqF8c4BSf-9 \
-        --id "$ITEM_ID" \
-        --field-id PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
-        --single-select-option-id 98236657 2>/dev/null || true
-    }
-elif [ -n "$ISSUE_NODE_ID" ] && [ "$ISSUE_NODE_ID" != "null" ]; then
-  # No item_id — just close the issue via GraphQL
-  gh api graphql \
-    -f query='mutation($issueId:ID!) {
-      closeIssue(input:{issueId:$issueId, stateReason:COMPLETED}) {
-        issue { id }
-      }
-    }' \
-    -f issueId="$ISSUE_NODE_ID" 2>/dev/null || \
-    gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
+  printf "%b" "$body"
+}
+
+SESSION_ISSUE_FILE="/tmp/bc-session-issue.json"
+
+if [ -f "$SESSION_ISSUE_FILE" ]; then
+  # Session issue already exists — update it with current log
+  ISSUE_NUMBER=$(jq -r '.issue_number' "$SESSION_ISSUE_FILE")
+  ISSUE_BODY=$(build_issue_body)
+
+  gh issue edit "$ISSUE_NUMBER" \
+    --repo BigClungus/bigclungus-meta \
+    --body "$ISSUE_BODY" 2>/dev/null || true
+
+  echo "subagent-stop: updated session issue #$ISSUE_NUMBER for agent $AGENT_ID" >&2
 else
-  # No node_id available — fall back to gh CLI
-  gh issue close "$ISSUE_NUMBER" --repo BigClungus/bigclungus-meta 2>/dev/null || true
+  # First stop of the session — create the session issue
+  SESSION_DATE=$(date -u +"%Y-%m-%d")
+  ISSUE_TITLE="[session] BigClungus subagent log — ${SESSION_DATE}"
+  ISSUE_BODY=$(build_issue_body)
+
+  ISSUE_JSON=$(gh issue create \
+    --repo BigClungus/bigclungus-meta \
+    --title "$ISSUE_TITLE" \
+    --body "$ISSUE_BODY" \
+    --label "automated,subagent" \
+    --json nodeId,url,number 2>/dev/null)
+
+  ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number // empty')
+  ISSUE_NODE_ID=$(echo "$ISSUE_JSON" | jq -r '.nodeId // empty')
+
+  if [ -z "$ISSUE_NUMBER" ]; then
+    echo "subagent-stop: failed to create session issue" >&2
+    exit 0
+  fi
+
+  # Add to GitHub Project and set status "In Progress"
+  ITEM_ID=$(gh api graphql \
+    -f query='mutation($projectId:ID!, $issueId:ID!) {
+      addProjectV2ItemById(input:{projectId:$projectId, contentId:$issueId}) {
+        item { id }
+      }
+    }' \
+    -f projectId=PVT_kwHOEBqF8c4BSf-9 \
+    -f issueId="$ISSUE_NODE_ID" \
+    --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null || true)
+
+  if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+    gh api graphql \
+      -f query='mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+        updateProjectV2ItemFieldValue(input:{projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{singleSelectOptionId:$optionId}}) {
+          projectV2Item { id }
+        }
+      }' \
+      -f projectId=PVT_kwHOEBqF8c4BSf-9 \
+      -f itemId="$ITEM_ID" \
+      -f fieldId=PVTSSF_lAHOEBqF8c4BSf-9zhAA8iU \
+      -f optionId=47fc9ee4 2>/dev/null || true
+  fi
+
+  # Save session issue state
+  jq -n \
+    --argjson issue_number "$ISSUE_NUMBER" \
+    --arg item_id "${ITEM_ID:-}" \
+    --arg issue_node_id "${ISSUE_NODE_ID:-}" \
+    '{issue_number: $issue_number, item_id: $item_id, issue_node_id: $issue_node_id}' \
+    > "$SESSION_ISSUE_FILE"
+
+  echo "subagent-stop: created session issue #$ISSUE_NUMBER for agent $AGENT_ID" >&2
 fi
-
-# Clean up state file
-rm -f "$STATE_FILE"
-
-echo "subagent-stop: closed issue #$ISSUE_NUMBER for agent $AGENT_ID" >&2
 
 exit 0
