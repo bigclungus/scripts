@@ -1,5 +1,7 @@
 #!/bin/bash
 # Watchdog: marks in_progress tasks as stale if they've been running for >2 hours.
+# Detects open tasks by: last log entry event == "started" AND ts is >2h ago.
+# Backward compat: also handles old-format tasks with status: "in_progress".
 # Run on bot restart or periodically to clean up orphaned task records.
 
 set -euo pipefail
@@ -13,10 +15,24 @@ for task_file in "$TASKS_DIR"/*.json; do
   [ -f "$task_file" ] || continue
   [ "$(basename "$task_file")" = ".gitkeep" ] && continue
 
-  STATUS=$(jq -r '.status // ""' "$task_file")
-  [ "$STATUS" = "in_progress" ] || continue
+  # Determine if task is open via new log format or old status field
+  LAST_LOG_EVENT=$(jq -r 'if (.log | length) > 0 then .log[-1].event else "" end' "$task_file")
+  OLD_STATUS=$(jq -r '.status // ""' "$task_file")
 
-  STARTED_AT=$(jq -r '.started_at // ""' "$task_file")
+  IS_OPEN=0
+  STARTED_AT=""
+
+  if [ "$LAST_LOG_EVENT" = "started" ]; then
+    IS_OPEN=1
+    # Use the "started" log entry's ts for age calculation
+    STARTED_AT=$(jq -r '.log[] | select(.event == "started") | .ts' "$task_file" | head -1)
+  elif [ -z "$LAST_LOG_EVENT" ] && [ "$OLD_STATUS" = "in_progress" ]; then
+    # Backward compat: old format with no log array
+    IS_OPEN=1
+    STARTED_AT=$(jq -r '.started_at // ""' "$task_file")
+  fi
+
+  [ "$IS_OPEN" -eq 1 ] || continue
   [ -n "$STARTED_AT" ] || continue
 
   # Convert ISO8601 to epoch
@@ -25,15 +41,24 @@ for task_file in "$TASKS_DIR"/*.json; do
 
   # 2 hours = 7200 seconds
   if [ "$AGE_SECONDS" -ge 7200 ]; then
-    FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    STALE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     TASK_ID=$(jq -r '.id // "(unknown)"' "$task_file")
 
-    UPDATED=$(jq \
-      --arg status "stale" \
-      --arg finished_at "$FINISHED_AT" \
-      --arg summary "Marked stale by watchdog — session likely ended before task completed" \
-      '.status = $status | .finished_at = $finished_at | .summary = $summary' \
-      "$task_file")
+    if [ -n "$LAST_LOG_EVENT" ]; then
+      # New format: append stale log entry
+      UPDATED=$(jq \
+        --arg ts "$STALE_TS" \
+        '.log += [{ts: $ts, event: "stale", context: "Marked stale by watchdog — session likely ended before task completed"}]' \
+        "$task_file")
+    else
+      # Old format backward compat: update status fields
+      UPDATED=$(jq \
+        --arg status "stale" \
+        --arg finished_at "$STALE_TS" \
+        --arg summary "Marked stale by watchdog — session likely ended before task completed" \
+        '.status = $status | .finished_at = $finished_at | .summary = $summary' \
+        "$task_file")
+    fi
 
     echo "$UPDATED" > "$task_file"
     STALE_COUNT=$(( STALE_COUNT + 1 ))

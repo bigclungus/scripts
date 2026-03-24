@@ -58,7 +58,7 @@ TASK_ID="task-$(date +%Y%m%d-%H%M%S)-${AGENT_ID:0:8}"
 TASKS_DIR="/home/clungus/work/bigclungus-meta/tasks"
 TASK_FILE="$TASKS_DIR/${TASK_ID}.json"
 
-# Write task JSON file
+# Write task JSON file with append-only log format
 jq -n \
   --arg id "$TASK_ID" \
   --arg title "$TITLE" \
@@ -67,19 +67,22 @@ jq -n \
   --arg session_id "$SESSION_ID" \
   --argjson discord_message_id "$DISCORD_MESSAGE_ID" \
   --argjson discord_user "$DISCORD_USER" \
-  --arg started_at "$TIMESTAMP" \
+  --arg ts "$TIMESTAMP" \
   '{
     id: $id,
     title: $title,
-    status: "in_progress",
     agent_id: $agent_id,
     agent_type: $agent_type,
     session_id: $session_id,
     discord_message_id: $discord_message_id,
     discord_user: $discord_user,
-    started_at: $started_at,
-    finished_at: null,
-    summary: null
+    log: [
+      {
+        ts: $ts,
+        event: "started",
+        context: $title
+      }
+    ]
   }' > "$TASK_FILE"
 
 # Store task ID in agent state file for subagent-stop.sh to pick up

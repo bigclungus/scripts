@@ -1,7 +1,7 @@
 #!/bin/bash
 # Hook: SubagentStop
 # Fires when a subagent finishes.
-# Updates the task JSON file: status=done, finished_at=now, summary=first 500 chars of last message.
+# Appends a "done" log entry to the task JSON file.
 # Async git commit+push. Zero GitHub API calls.
 #
 # Input JSON (stdin) fields:
@@ -46,18 +46,17 @@ if [ ! -f "$TASK_FILE" ]; then
   exit 0
 fi
 
-# Truncate summary to 500 chars
-SUMMARY="${LAST_MSG:0:500}"
+# Truncate context to 500 chars
+CONTEXT="${LAST_MSG:0:500}"
 if [ ${#LAST_MSG} -gt 500 ]; then
-  SUMMARY="${SUMMARY}...(truncated)"
+  CONTEXT="${CONTEXT}...(truncated)"
 fi
 
-# Update the task JSON: set status=done, finished_at, summary
+# Append a "done" log entry to the task JSON
 UPDATED=$(jq \
-  --arg status "done" \
-  --arg finished_at "$TIMESTAMP" \
-  --arg summary "$SUMMARY" \
-  '.status = $status | .finished_at = $finished_at | .summary = $summary' \
+  --arg ts "$TIMESTAMP" \
+  --arg context "$CONTEXT" \
+  '.log += [{ts: $ts, event: "done", context: $context, artifacts: []}]' \
   "$TASK_FILE")
 
 echo "$UPDATED" > "$TASK_FILE"
