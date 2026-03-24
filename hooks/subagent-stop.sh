@@ -23,6 +23,34 @@ if [ -z "$AGENT_ID" ]; then
   exit 0
 fi
 
+# Rate limit check — skip GitHub calls if we've hit the soft limit
+RATELIMIT_FILE="/tmp/bc-gh-ratelimit.json"
+RATELIMIT_MAX=200
+RATELIMIT_WINDOW=3600
+NOW_RL=$(date +%s)
+
+RL_COUNT=0
+RL_WINDOW_START=$NOW_RL
+
+if [ -f "$RATELIMIT_FILE" ]; then
+  RL_COUNT=$(jq -r '.count // 0' "$RATELIMIT_FILE" 2>/dev/null || echo 0)
+  RL_WINDOW_START=$(jq -r '.window_start // 0' "$RATELIMIT_FILE" 2>/dev/null || echo 0)
+  WINDOW_AGE=$(( NOW_RL - RL_WINDOW_START ))
+  if [ "$WINDOW_AGE" -ge "$RATELIMIT_WINDOW" ]; then
+    RL_COUNT=0
+    RL_WINDOW_START=$NOW_RL
+  fi
+fi
+
+if [ "$RL_COUNT" -ge "$RATELIMIT_MAX" ]; then
+  echo "subagent-stop: rate limit reached ($RL_COUNT/$RATELIMIT_MAX in window), skipping GitHub" >&2
+  exit 0
+fi
+
+# Increment counter
+jq -n --argjson count "$((RL_COUNT + 1))" --argjson ws "$RL_WINDOW_START" \
+  '{count: $count, window_start: $ws}' > "$RATELIMIT_FILE"
+
 STATE_FILE="/tmp/bc-agents/${AGENT_ID}.json"
 
 if [ ! -f "$STATE_FILE" ]; then
