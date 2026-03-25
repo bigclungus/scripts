@@ -80,7 +80,6 @@ echo "watchdog: $STALE_COUNT task(s) marked stale"
 temporal workflow list \
   --query 'WorkflowType="CongressWorkflow" AND ExecutionStatus="Running"' \
   --address localhost:7233 \
-  --fields WorkflowId,StartTime \
   --output json 2>/dev/null | python3 -c "
 import json, sys, datetime, subprocess
 
@@ -104,7 +103,7 @@ try:
             ], capture_output=True)
 except Exception as e:
     print(f'Congress stall check error: {e}', file=sys.stderr)
-" 2>/dev/null
+" 2>/dev/null || true
 
 # Also mark session JSONs for terminated congresses
 python3 - <<'PYEOF'
@@ -130,4 +129,77 @@ for path in glob.glob(f'{sessions_dir}/congress-*.json'):
             print(f'Marked stale: {os.path.basename(path)}')
     except Exception as e:
         pass
+PYEOF
+
+# Clean up deliberating sessions whose Temporal workflow is no longer running.
+# Workflows don't always update session JSON on failure/completion, so sessions
+# can get stuck in "deliberating" indefinitely.
+python3 - <<'PYEOF'
+import asyncio, json, os, glob, datetime, subprocess, sys
+
+async def main():
+    sessions_dir = '/home/clungus/work/hello-world/sessions'
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    # Find all sessions currently stuck in "deliberating"
+    deliberating = []
+    for path in glob.glob(f'{sessions_dir}/congress-*.json'):
+        try:
+            d = json.load(open(path))
+            if d.get('status') == 'deliberating':
+                deliberating.append((path, d))
+        except Exception as e:
+            print(f'Warning: could not read {path}: {e}', file=sys.stderr)
+
+    if not deliberating:
+        print('congress orphan check: no deliberating sessions found')
+        return
+
+    # Query Temporal for currently RUNNING CongressWorkflows
+    try:
+        from temporalio.client import Client
+        client = await Client.connect('localhost:7233')
+        running_workflows = []
+        async for wf in client.list_workflows(
+            query='WorkflowType="CongressWorkflow" AND ExecutionStatus="Running"'
+        ):
+            running_workflows.append(wf)
+    except Exception as e:
+        print(f'congress orphan check: could not query Temporal: {e}', file=sys.stderr)
+        return
+
+    cleaned = 0
+    for path, d in deliberating:
+        started = d.get('started_at', '')
+        if not started:
+            age_minutes = 9999
+        else:
+            try:
+                start = datetime.datetime.fromisoformat(started.replace('Z', '+00:00'))
+                age_minutes = (now - start).total_seconds() / 60
+            except Exception:
+                age_minutes = 9999
+
+        if len(running_workflows) == 0:
+            # No running congresses at all — safe to mark all deliberating sessions failed
+            d['status'] = 'failed'
+            d['failure_reason'] = 'Session marked failed by watchdog: no active workflow found'
+            json.dump(d, open(path, 'w'), indent=2)
+            cleaned += 1
+            print(f'congress orphan check: marked {os.path.basename(path)} failed (no running workflows)')
+        elif age_minutes > 10:
+            # There are running congresses but this session is >10 min old.
+            # The active congress would have updated its session within 10 min,
+            # so if this one hasn't it's almost certainly orphaned.
+            d['status'] = 'failed'
+            d['failure_reason'] = 'Session marked failed by watchdog: no active workflow found'
+            json.dump(d, open(path, 'w'), indent=2)
+            cleaned += 1
+            print(f'congress orphan check: marked {os.path.basename(path)} failed (age {age_minutes:.0f}min, {len(running_workflows)} other workflow(s) running)')
+        else:
+            print(f'congress orphan check: skipping {os.path.basename(path)} (age {age_minutes:.0f}min, {len(running_workflows)} workflow(s) running — may be active)')
+
+    print(f'congress orphan check: {cleaned} orphaned session(s) cleaned up')
+
+asyncio.run(main())
 PYEOF
