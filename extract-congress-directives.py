@@ -41,6 +41,11 @@ def main():
         if status != "done" or not verdict or len(verdict) < 50:
             continue
 
+        # Skip Ibrahim-aborted sessions (spoof topics, shitposts, etc.)
+        if verdict.strip().startswith("ABORTED by Ibrahim:"):
+            print(f"Skipping aborted session: {session_id} (Congress #{d.get('session_number', '?')})")
+            continue
+
         # Skip already-recorded sessions (idempotent)
         if already_recorded(session_id, current):
             print(f"Already recorded: {session_id}")
