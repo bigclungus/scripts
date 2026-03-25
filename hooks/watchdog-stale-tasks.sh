@@ -1,8 +1,8 @@
 #!/bin/bash
 # Watchdog: marks in_progress tasks as stale if they've been running for >2 hours.
-# Detects open tasks by: last log entry event == "started" AND ts is >2h ago.
-# Backward compat: also handles old-format tasks with status: "in_progress".
-# Run on bot restart or periodically to clean up orphaned task records.
+# Detects open tasks by: no terminal event (done/failed/cancelled/stale) in log AND
+# first log entry is >2h old. Backward compat: also handles old-format tasks with
+# status: "in_progress". Run on bot restart or periodically to clean up orphaned records.
 
 set -euo pipefail
 
@@ -15,18 +15,21 @@ for task_file in "$TASKS_DIR"/*.json; do
   [ -f "$task_file" ] || continue
   [ "$(basename "$task_file")" = ".gitkeep" ] && continue
 
-  # Determine if task is open via new log format or old status field
-  LAST_LOG_EVENT=$(jq -r 'if (.log | length) > 0 then .log[-1].event else "" end' "$task_file")
+  LOG_LEN=$(jq '.log | length' "$task_file" 2>/dev/null || echo 0)
   OLD_STATUS=$(jq -r '.status // ""' "$task_file")
 
   IS_OPEN=0
   STARTED_AT=""
 
-  if [ "$LAST_LOG_EVENT" = "started" ]; then
-    IS_OPEN=1
-    # Use the "started" log entry's ts for age calculation
-    STARTED_AT=$(jq -r '.log[] | select(.event == "started") | .ts' "$task_file" | head -1)
-  elif [ -z "$LAST_LOG_EVENT" ] && [ "$OLD_STATUS" = "in_progress" ]; then
+  if [ "$LOG_LEN" -gt 0 ]; then
+    # New format: open if log is non-empty AND contains no terminal event
+    HAS_TERMINAL=$(jq -r '[.log[].event] | map(select(. == "done" or . == "failed" or . == "cancelled" or . == "stale")) | length' "$task_file")
+    if [ "$HAS_TERMINAL" -eq 0 ]; then
+      IS_OPEN=1
+      # Use the FIRST log entry's ts for age (when the task was actually started)
+      STARTED_AT=$(jq -r '.log[0].ts' "$task_file")
+    fi
+  elif [ "$LOG_LEN" -eq 0 ] && [ "$OLD_STATUS" = "in_progress" ]; then
     # Backward compat: old format with no log array
     IS_OPEN=1
     STARTED_AT=$(jq -r '.started_at // ""' "$task_file")
@@ -44,7 +47,7 @@ for task_file in "$TASKS_DIR"/*.json; do
     STALE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     TASK_ID=$(jq -r '.id // "(unknown)"' "$task_file")
 
-    if [ -n "$LAST_LOG_EVENT" ]; then
+    if [ "$LOG_LEN" -gt 0 ]; then
       # New format: append stale log entry
       UPDATED=$(jq \
         --arg ts "$STALE_TS" \
