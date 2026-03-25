@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append a log event to a task JSON file.
+"""Append a log event to a task JSON file and to the SQLite task store.
 
 Usage: python3 log_task_event.py <task_id_or_file> <event_type> <message>
 
@@ -40,6 +40,58 @@ def find_task_file(task_id_or_file: str) -> str:
         return matches[0]
     raise FileNotFoundError(f"No task file found for: {task_id_or_file}")
 
+
+def _write_to_sqlite(task_id: str, task_data: dict, event_type: str, message: str, ts: str) -> None:
+    """Write the event and update the task row in SQLite. Non-fatal if DB is unavailable."""
+    try:
+        # Import here so the script still works if tasks_db.py is missing during early migration
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, scripts_dir)
+        from tasks_db import DEFAULT_DB, get_db, init_db
+
+        db_path = DEFAULT_DB
+        if not os.path.exists(db_path):
+            # DB not yet initialized — skip silently during transition period
+            return
+
+        conn = get_db(db_path)
+
+        # Determine current status
+        status = task_data.get("status", "in_progress")
+
+        # Upsert the task row (in case it's new or not yet migrated)
+        conn.execute(
+            """
+            INSERT INTO tasks (id, title, status, created_at, updated_at, archived, data)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status     = excluded.status,
+                updated_at = excluded.updated_at,
+                data       = excluded.data
+            """,
+            (
+                task_id,
+                task_data.get("title", ""),
+                status,
+                task_data.get("started_at", ts),
+                ts,
+                json.dumps(task_data),
+            ),
+        )
+
+        # Insert the event
+        conn.execute(
+            "INSERT INTO task_events (task_id, event, message, ts) VALUES (?, ?, ?, ?)",
+            (task_id, event_type, message, ts),
+        )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Log to stderr but never block the JSON write
+        print(f"Warning: SQLite write failed for {task_id}: {e}", file=sys.stderr)
+
+
 def main():
     if len(sys.argv) < 4:
         print("Usage: log_task_event.py <task_id_or_file> <event_type> <message>")
@@ -59,9 +111,10 @@ def main():
     if "log" not in data:
         data["log"] = []
 
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     entry = {
         "event": event_type,
-        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ts": ts,
         "message": message
     }
     data["log"].append(entry)
@@ -72,7 +125,13 @@ def main():
     elif event_type == "blocked":
         data["status"] = "blocked"
 
+    # Write JSON (primary store during transition)
     json.dump(data, open(path, "w"), indent=2)
+
+    # Write to SQLite (secondary store during transition)
+    task_id = data.get("id", os.path.splitext(os.path.basename(path))[0])
+    _write_to_sqlite(task_id, data, event_type, message, ts)
+
     print(f"Logged [{event_type}] to {os.path.basename(path)}: {message}")
 
 if __name__ == "__main__":

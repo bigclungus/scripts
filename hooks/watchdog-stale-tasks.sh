@@ -3,13 +3,70 @@
 # Detects open tasks by: no terminal event (done/failed/cancelled/stale) in log AND
 # first log entry is >2h old. Backward compat: also handles old-format tasks with
 # status: "in_progress". Run on bot restart or periodically to clean up orphaned records.
+#
+# SQLite check: if tasks.db exists, also marks stale tasks there.
 
 set -euo pipefail
 
 TASKS_DIR="/home/clungus/work/bigclungus-meta/tasks"
+TASKS_DB="/home/clungus/work/bigclungus-meta/tasks.db"
 NOW_TS=$(date +%s)
 STALE_COUNT=0
 CHANGED=0
+
+# --- SQLite stale check (runs alongside JSON check during transition) ---
+if [ -f "$TASKS_DB" ]; then
+  SQLITE_STALE=$(python3 - <<'PYEOF'
+import sqlite3, sys, json
+from datetime import datetime, timezone, timedelta
+
+DB = "/home/clungus/work/bigclungus-meta/tasks.db"
+STALE_TS = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+CUTOFF = datetime.now(timezone.utc) - timedelta(hours=2)
+OPEN_STATUSES = ("in_progress", "started", "blocked", "milestone")
+
+try:
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM tasks WHERE archived=0 AND status NOT IN ('done','failed','cancelled','stale')"
+    ).fetchall()
+
+    stale_ids = []
+    for row in rows:
+        ts_str = row["updated_at"] or row["created_at"] or ""
+        if not ts_str:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts < CUTOFF:
+                stale_ids.append(row["id"])
+        except ValueError:
+            continue
+
+    for task_id in stale_ids:
+        conn.execute(
+            "UPDATE tasks SET status='stale', updated_at=? WHERE id=?",
+            (STALE_TS, task_id)
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, event, message, ts) VALUES (?, 'stale', 'Marked stale by watchdog — session likely ended before task completed', ?)",
+            (task_id, STALE_TS)
+        )
+        print(f"sqlite-watchdog: marked {task_id} as stale", flush=True)
+
+    conn.commit()
+    conn.close()
+    sys.exit(0)
+except Exception as e:
+    print(f"sqlite-watchdog error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  )
+  if [ -n "$SQLITE_STALE" ]; then
+    echo "$SQLITE_STALE" >&2
+  fi
+fi
 
 for task_file in "$TASKS_DIR"/*.json; do
   [ -f "$task_file" ] || continue
