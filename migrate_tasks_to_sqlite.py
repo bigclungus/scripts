@@ -13,14 +13,13 @@ import glob
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 from tasks_db import DEFAULT_DB, get_db, init_db
 
 TASKS_DIR = "/home/clungus/work/bigclungus-meta/tasks"
 TERMINAL_STATUSES = {"done", "failed", "cancelled", "stale"}
-ARCHIVE_AFTER_HOURS = 6
 
 
 def derive_status(data: dict) -> str:
@@ -45,19 +44,6 @@ def derive_created_at(data: dict) -> str:
     if log:
         return log[0].get("ts", "")
     return ""
-
-
-def should_archive(status: str, updated_at: str) -> bool:
-    if status not in TERMINAL_STATUSES:
-        return False
-    if not updated_at:
-        return True  # No timestamp = old, archive it
-    try:
-        ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - ts
-        return age > timedelta(hours=ARCHIVE_AFTER_HOURS)
-    except ValueError:
-        return True
 
 
 def main():
@@ -103,13 +89,11 @@ def main():
         else:
             updated_at = data.get("finished_at", created_at)
 
-        archived = 1 if should_archive(status, updated_at) else 0
-
         try:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO tasks (id, title, status, created_at, updated_at, archived, data)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO tasks (id, title, status, created_at, updated_at, data)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -117,7 +101,6 @@ def main():
                     status,
                     created_at,
                     updated_at,
-                    archived,
                     json.dumps(data),
                 ),
             )
@@ -162,15 +145,19 @@ def main():
     # Quick sanity check
     conn2 = get_db(db_path)
     total = conn2.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-    archived_count = conn2.execute("SELECT COUNT(*) FROM tasks WHERE archived=1").fetchone()[0]
-    active_count = conn2.execute("SELECT COUNT(*) FROM tasks WHERE archived=0").fetchone()[0]
+    open_count = conn2.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done','failed','cancelled','stale')"
+    ).fetchone()[0]
+    terminal_count = conn2.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('done','failed','cancelled','stale')"
+    ).fetchone()[0]
     event_count = conn2.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
     conn2.close()
 
     print(f"\nDB state:")
     print(f"  Total tasks:    {total}")
-    print(f"  Active:         {active_count}")
-    print(f"  Archived:       {archived_count}")
+    print(f"  Open:           {open_count}")
+    print(f"  Terminal:       {terminal_count}")
     print(f"  Total events:   {event_count}")
 
 

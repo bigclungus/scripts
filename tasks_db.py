@@ -3,7 +3,7 @@
 DB lives at /home/clungus/work/bigclungus-meta/tasks.db
 
 Tables:
-  tasks       — one row per task (id, title, status, timestamps, archived flag, full JSON blob)
+  tasks       — one row per task (id, title, status, timestamps, full JSON blob)
   task_events — append-only event log (mirrors the log[] array in JSON files)
 """
 
@@ -32,7 +32,6 @@ def init_db(db_path: str = DEFAULT_DB) -> None:
             status      TEXT,
             created_at  TEXT,
             updated_at  TEXT,
-            archived    INTEGER DEFAULT 0,
             data        TEXT    -- full task JSON blob
         );
 
@@ -45,10 +44,9 @@ def init_db(db_path: str = DEFAULT_DB) -> None:
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_tasks_status    ON tasks(status);
-        CREATE INDEX IF NOT EXISTS idx_tasks_archived  ON tasks(archived);
-        CREATE INDEX IF NOT EXISTS idx_tasks_created   ON tasks(created_at);
-        CREATE INDEX IF NOT EXISTS idx_events_task_id  ON task_events(task_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_created  ON tasks(created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_task_id ON task_events(task_id);
     """)
     conn.commit()
     conn.close()

@@ -62,8 +62,8 @@ def _write_to_sqlite(task_id: str, task_data: dict, event_type: str, message: st
         # Upsert the task row (in case it's new or not yet migrated)
         conn.execute(
             """
-            INSERT INTO tasks (id, title, status, created_at, updated_at, archived, data)
-            VALUES (?, ?, ?, ?, ?, 0, ?)
+            INSERT INTO tasks (id, title, status, created_at, updated_at, data)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status     = excluded.status,
                 updated_at = excluded.updated_at,

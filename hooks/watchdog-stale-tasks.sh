@@ -29,7 +29,7 @@ try:
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT id, title, created_at, updated_at FROM tasks WHERE archived=0 AND status NOT IN ('done','failed','cancelled','stale')"
+        "SELECT id, title, created_at, updated_at FROM tasks WHERE status NOT IN ('done','failed','cancelled','stale')"
     ).fetchall()
 
     stale_ids = []
