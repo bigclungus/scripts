@@ -19,7 +19,20 @@ def check_flaky_services() -> str | None:
     """
     Detect services that have restarted or failed recently (last 24h).
     A service that restarted multiple times in 24h is flaky.
+
+    Services that are routinely restarted as part of normal deploys are excluded
+    from the restart-count heuristic entirely.  They are only flagged if they show
+    actual crash indicators (non-zero exit code, OOM kill, or unhandled exceptions).
     """
+    # Services that are restarted intentionally on every code deploy.
+    # Counting their Start/Stop events would produce constant false positives.
+    DEPLOY_SERVICES = {
+        "temporal-worker",
+        "website",
+        "clunger",
+        "labs-router",
+    }
+
     result = subprocess.run(
         ["journalctl", "--user", "-n", "500", "--since", "24h ago",
          "--no-pager", "-o", "short"],
@@ -33,26 +46,47 @@ def check_flaky_services() -> str | None:
     # Count "Started <service>" / "Stopped <service>" / "Failed <service>" events per unit
     restart_counts: dict[str, int] = {}
     failure_counts: dict[str, int] = {}
+    crash_indicators: dict[str, list[str]] = {}  # svc -> list of crash evidence lines
 
     started_re = re.compile(r"Started\s+(.+?)\.service", re.IGNORECASE)
     stopped_re = re.compile(r"Stopped\s+(.+?)\.service", re.IGNORECASE)
     failed_re  = re.compile(r"(Failed|failed with result)\s+.*?([a-zA-Z0-9_-]+)\.service", re.IGNORECASE)
+    # Crash indicators: non-zero exit codes, OOM kills, Python/Node unhandled exceptions
+    crash_re   = re.compile(
+        r"(exit-code|killed|oom.kill|OOM|unhandled exception|Traceback|uncaughtException"
+        r"|Main process exited.*code=exited.*status=[^0])",
+        re.IGNORECASE,
+    )
 
     for line in lines:
+        # Track crash indicators for any service mention on the line
+        if crash_re.search(line):
+            # Try to attribute crash to a named service from the line or accumulate as generic
+            for svc_match in re.finditer(r"([a-zA-Z0-9_-]+)\.service", line):
+                svc = svc_match.group(1)
+                crash_indicators.setdefault(svc, []).append(line)
+
         m = started_re.search(line)
         if m:
             svc = m.group(1).strip()
-            restart_counts[svc] = restart_counts.get(svc, 0) + 1
+            if svc not in DEPLOY_SERVICES:
+                restart_counts[svc] = restart_counts.get(svc, 0) + 1
 
         m = stopped_re.search(line)
         if m:
             svc = m.group(1).strip()
-            restart_counts[svc] = restart_counts.get(svc, 0) + 1
+            if svc not in DEPLOY_SERVICES:
+                restart_counts[svc] = restart_counts.get(svc, 0) + 1
 
         m = failed_re.search(line)
         if m:
             svc = m.group(2).strip()
             failure_counts[svc] = failure_counts.get(svc, 0) + 1
+
+    # For deploy services, only flag if actual crash indicators exist
+    for svc in DEPLOY_SERVICES:
+        if svc in crash_indicators and len(crash_indicators[svc]) >= 2:
+            failure_counts[svc] = failure_counts.get(svc, 0) + len(crash_indicators[svc])
 
     # Flag services that restarted 3+ times (flaky) or failed 2+ times
     flaky = [s for s, n in restart_counts.items() if n >= 3]
