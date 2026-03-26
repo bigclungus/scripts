@@ -58,13 +58,23 @@ def check_flaky_services() -> str | None:
     flaky = [s for s, n in restart_counts.items() if n >= 3]
     failing = [s for s, n in failure_counts.items() if n >= 2]
 
+    def is_currently_active(svc: str) -> bool:
+        """Return True only if the service is currently active or activating."""
+        r = subprocess.run(
+            ["systemctl", "--user", "is-active", f"{svc}.service"],
+            capture_output=True, text=True, timeout=5
+        )
+        return r.stdout.strip() in ("active", "activating")
+
     if failing:
         top = sorted(failing, key=lambda s: failure_counts[s], reverse=True)[0]
-        return f"service {top}.service has failed {failure_counts[top]}x in last 24h — investigate restart loop"
+        if is_currently_active(top):
+            return f"service {top}.service has failed {failure_counts[top]}x in last 24h — investigate restart loop"
 
     if flaky:
         top = sorted(flaky, key=lambda s: restart_counts[s], reverse=True)[0]
-        return f"service {top}.service restarted {restart_counts[top]}x in last 24h — possible flakiness"
+        if is_currently_active(top):
+            return f"service {top}.service restarted {restart_counts[top]}x in last 24h — possible flakiness"
 
     return None
 
