@@ -162,9 +162,56 @@ def run() -> str | None:
     return None
 
 
+def is_duplicate_finding(finding: str) -> bool:
+    """
+    Check whether a finding already has a matching GitHub issue — either open
+    or closed within the last 7 days.  Returns True if a duplicate is found
+    (suppress the finding), False if it is novel.
+
+    Uses a simple keyword search: the first ~60 chars of the finding are used
+    as the query so minor wording differences still match.
+    """
+    search_term = finding[:60].strip()
+    repo = "bigclungus/bigclungus-meta"
+    base_cmd = [
+        "gh", "issue", "list",
+        "--repo", repo,
+        "--label", "idea",
+        "--search", search_term,
+        "--json", "number,title",
+        "--limit", "10",
+    ]
+
+    # 1. Check open issues
+    open_result = subprocess.run(
+        base_cmd + ["--state", "open"],
+        capture_output=True, text=True, timeout=20
+    )
+    if open_result.returncode != 0:
+        # gh not available or auth error — don't block the finding
+        return False
+    if open_result.stdout.strip() not in ("", "[]"):
+        return True  # duplicate found in open issues
+
+    # 2. Check recently-closed issues (last 7 days)
+    closed_result = subprocess.run(
+        base_cmd + ["--state", "closed"],
+        capture_output=True, text=True, timeout=20
+    )
+    if closed_result.returncode != 0:
+        return False
+    if closed_result.stdout.strip() not in ("", "[]"):
+        return True  # duplicate found in recently-closed issues
+
+    return False
+
+
 if __name__ == "__main__":
     finding = run()
     if finding:
+        if is_duplicate_finding(finding):
+            # Already tracked (open or recently closed) — skip to avoid re-opening
+            sys.exit(0)
         print(finding)
         sys.exit(0)
     else:
