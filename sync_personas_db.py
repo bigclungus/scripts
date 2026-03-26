@@ -90,57 +90,73 @@ def _bool_int(val) -> int:
 
 
 def load_personas() -> list[dict]:
-    """Scan active and fired directories, return list of persona dicts."""
+    """Scan the unified agents directory, return list of persona dicts.
+
+    Status is derived from the 'status' field in each file's YAML frontmatter:
+      eligible/moderator → 'active' in the DB
+      ineligible         → 'fired' in the DB
+    """
+    # Map from MD frontmatter status values to DB status strings
+    STATUS_MAP = {
+        'eligible': 'active',
+        'moderator': 'active',
+        'ineligible': 'fired',
+    }
+
     personas = []
-    for status, dirpath in [('active', os.path.join(AGENTS_BASE, 'active')),
-                             ('fired', os.path.join(AGENTS_BASE, 'fired'))]:
-        for fpath in sorted(glob.glob(os.path.join(dirpath, '*.md'))):
-            with open(fpath, 'r') as f:
-                content = f.read()
-            meta, body = _parse_frontmatter(content)
+    for fpath in sorted(glob.glob(os.path.join(AGENTS_BASE, '*.md'))):
+        # Skip non-persona files (e.g. README.md)
+        if os.path.basename(fpath).upper() == 'README.MD':
+            continue
+        with open(fpath, 'r') as f:
+            content = f.read()
+        meta, body = _parse_frontmatter(content)
 
-            name = meta.get('name') or os.path.splitext(os.path.basename(fpath))[0]
-            display_name = meta.get('display_name') or name
-            model = str(meta.get('model') or 'claude').strip()
-            role = meta.get('role') or None
-            title = meta.get('title') or None
-            sex = meta.get('sex') or None
-            congress = _bool_int(meta.get('congress', True))
-            evolves = _bool_int(meta.get('evolves', True))
-            special_seat = _bool_int(meta.get('special_seat', False))
-            stakeholder_only = _bool_int(meta.get('stakeholder_only', False))
-            avatar_url = meta.get('avatar_url') or None
-            prompt_hash = _sha256_body(body)
+        fm_status = str(meta.get('status') or 'eligible').strip()
+        db_status = STATUS_MAP.get(fm_status, 'active')
 
-            # Harvest existing stats from YAML (written back by congress_evolve)
-            last_verdict = meta.get('stats_last_verdict') or None
-            last_verdict_date = meta.get('stats_last_verdict_date') or None
+        name = meta.get('name') or os.path.splitext(os.path.basename(fpath))[0]
+        display_name = meta.get('display_name') or name
+        model = str(meta.get('model') or 'claude').strip()
+        role = meta.get('role') or None
+        title = meta.get('title') or None
+        sex = meta.get('sex') or None
+        congress = _bool_int(meta.get('congress', True))
+        evolves = _bool_int(meta.get('evolves', True))
+        special_seat = _bool_int(meta.get('special_seat', False))
+        stakeholder_only = _bool_int(meta.get('stakeholder_only', False))
+        avatar_url = meta.get('avatar_url') or None
+        prompt_hash = _sha256_body(body)
 
-            # YAML stats_* fields are written back by congress_evolve and are
-            # the authoritative cumulative counts for evolved/fired/retained.
-            yaml_evolved = int(meta.get('stats_evolved') or 0)
-            yaml_fired   = int(meta.get('stats_fired') or 0)
+        # Harvest existing stats from YAML (written back by congress_evolve)
+        last_verdict = meta.get('stats_last_verdict') or None
+        last_verdict_date = meta.get('stats_last_verdict_date') or None
 
-            personas.append({
-                'name': name,
-                'display_name': display_name,
-                'model': model,
-                'role': role,
-                'title': title,
-                'sex': sex,
-                'congress': congress,
-                'evolves': evolves,
-                'special_seat': special_seat,
-                'stakeholder_only': stakeholder_only,
-                'status': status,
-                'md_path': fpath,
-                'avatar_url': avatar_url,
-                'prompt_hash': prompt_hash,
-                'last_verdict': last_verdict,
-                'last_verdict_date': last_verdict_date,
-                'yaml_evolved': yaml_evolved,
-                'yaml_fired': yaml_fired,
-            })
+        # YAML stats_* fields are written back by congress_evolve and are
+        # the authoritative cumulative counts for evolved/fired/retained.
+        yaml_evolved = int(meta.get('stats_evolved') or 0)
+        yaml_fired   = int(meta.get('stats_fired') or 0)
+
+        personas.append({
+            'name': name,
+            'display_name': display_name,
+            'model': model,
+            'role': role,
+            'title': title,
+            'sex': sex,
+            'congress': congress,
+            'evolves': evolves,
+            'special_seat': special_seat,
+            'stakeholder_only': stakeholder_only,
+            'status': db_status,
+            'md_path': fpath,
+            'avatar_url': avatar_url,
+            'prompt_hash': prompt_hash,
+            'last_verdict': last_verdict,
+            'last_verdict_date': last_verdict_date,
+            'yaml_evolved': yaml_evolved,
+            'yaml_fired': yaml_fired,
+        })
     return personas
 
 
@@ -185,8 +201,13 @@ def compute_session_stats() -> dict[str, dict]:
             _ensure(k)
             stats[k]['total_congresses'] += 1
 
-        # Evolution verdicts
+        # Evolution verdicts — field may be a dict or a JSON-encoded string
         evolution = session.get('evolution') or {}
+        if isinstance(evolution, str):
+            try:
+                evolution = json.loads(evolution)
+            except Exception:
+                evolution = {}
         for evolved in evolution.get('evolved', []):
             dn = evolved.get('display_name', '')
             k = _key(dn)
