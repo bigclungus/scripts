@@ -7,7 +7,7 @@ no open issues). Checks for concrete operational reliability gaps and returns
 a finding string if one is found, or None if everything looks clean.
 
 Findings are used to fire a Congress with topic:
-  [heartbeat-ideation]: <finding>
+  [idea]: <finding>
 """
 
 import subprocess
