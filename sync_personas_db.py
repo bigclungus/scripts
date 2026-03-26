@@ -2,8 +2,9 @@
 """
 sync_personas_db.py — Sync persona metadata from markdown files into SQLite.
 
-Scans agents/active/*.md and agents/fired/*.md, parses YAML frontmatter,
-computes prose body hashes, then inserts/updates rows in personas.db.
+Scans agents/*.md, parses YAML frontmatter, computes prose body hashes,
+then inserts/updates rows in personas.db. Status values are passed through
+directly from frontmatter (eligible/ineligible/moderator) — no translation.
 Also scans congress session JSONs to compute runtime stats per persona.
 
 Usage:
@@ -34,7 +35,7 @@ CREATE TABLE IF NOT EXISTS personas (
   evolves           INTEGER NOT NULL DEFAULT 1,
   special_seat      INTEGER NOT NULL DEFAULT 0,
   stakeholder_only  INTEGER NOT NULL DEFAULT 0,
-  status            TEXT NOT NULL DEFAULT 'active',
+  status            TEXT NOT NULL DEFAULT 'eligible',
   md_path           TEXT NOT NULL,
   avatar_url        TEXT,
   prompt_hash       TEXT,
@@ -92,17 +93,9 @@ def _bool_int(val) -> int:
 def load_personas() -> list[dict]:
     """Scan the unified agents directory, return list of persona dicts.
 
-    Status is derived from the 'status' field in each file's YAML frontmatter:
-      eligible/moderator → 'active' in the DB
-      ineligible         → 'fired' in the DB
+    Status is derived from the 'status' field in each file's YAML frontmatter.
+    The DB speaks the same vocabulary as the MD files: eligible/ineligible/moderator.
     """
-    # Map from MD frontmatter status values to DB status strings
-    STATUS_MAP = {
-        'eligible': 'active',
-        'moderator': 'active',
-        'ineligible': 'fired',
-    }
-
     personas = []
     for fpath in sorted(glob.glob(os.path.join(AGENTS_BASE, '*.md'))):
         # Skip non-persona files (e.g. README.md)
@@ -112,8 +105,7 @@ def load_personas() -> list[dict]:
             content = f.read()
         meta, body = _parse_frontmatter(content)
 
-        fm_status = str(meta.get('status') or 'eligible').strip()
-        db_status = STATUS_MAP.get(fm_status, 'active')
+        db_status = str(meta.get('status') or 'eligible').strip()
 
         name = meta.get('name') or os.path.splitext(os.path.basename(fpath))[0]
         display_name = meta.get('display_name') or name
