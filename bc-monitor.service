@@ -1,0 +1,12 @@
+[Unit]
+Description=BigClungus continuous monitor
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /mnt/data/scripts/bc_monitor.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
