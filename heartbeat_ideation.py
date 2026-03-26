@@ -31,6 +31,14 @@ def check_flaky_services() -> str | None:
         "website",
         "clunger",
         "labs-router",
+        # Lab services — restarted on deploy, exclude from flapping heuristics
+        "tvtropes-explorer",
+        "cron-explain",
+        "diff-narrator",
+        "snippet",
+        "webhook-mirror",
+        "roundwatch",
+        "labs-roundwatch",
     }
 
     result = subprocess.run(
