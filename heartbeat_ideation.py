@@ -31,6 +31,8 @@ def check_flaky_services() -> str | None:
         "website",
         "clunger",
         "labs-router",
+        "claude-bot",
+        "commons-server",
         # Lab services — restarted on deploy, exclude from flapping heuristics
         "tvtropes-explorer",
         "cron-explain",
@@ -39,7 +41,17 @@ def check_flaky_services() -> str | None:
         "webhook-mirror",
         "roundwatch",
         "labs-roundwatch",
+        "labs-commons-v2",
     }
+
+    def _is_deploy_service(svc: str) -> bool:
+        """Return True if the service should be excluded from restart-count heuristics.
+
+        Any service whose name starts with 'labs-' is a sandboxed lab experiment —
+        these are restarted frequently during development and should never be flagged
+        for flapping.  The hardcoded DEPLOY_SERVICES set covers other known cases.
+        """
+        return svc in DEPLOY_SERVICES or svc.startswith("labs-")
 
     result = subprocess.run(
         ["journalctl", "--user", "-n", "500", "--since", "24h ago",
@@ -77,13 +89,13 @@ def check_flaky_services() -> str | None:
         m = started_re.search(line)
         if m:
             svc = m.group(1).strip()
-            if svc not in DEPLOY_SERVICES:
+            if not _is_deploy_service(svc):
                 restart_counts[svc] = restart_counts.get(svc, 0) + 1
 
         m = stopped_re.search(line)
         if m:
             svc = m.group(1).strip()
-            if svc not in DEPLOY_SERVICES:
+            if not _is_deploy_service(svc):
                 restart_counts[svc] = restart_counts.get(svc, 0) + 1
 
         m = failed_re.search(line)
@@ -92,9 +104,11 @@ def check_flaky_services() -> str | None:
             failure_counts[svc] = failure_counts.get(svc, 0) + 1
 
     # For deploy services, only flag if actual crash indicators exist
-    for svc in DEPLOY_SERVICES:
-        if svc in crash_indicators and len(crash_indicators[svc]) >= 2:
-            failure_counts[svc] = failure_counts.get(svc, 0) + len(crash_indicators[svc])
+    all_known_svcs = set(restart_counts) | set(failure_counts) | set(crash_indicators)
+    for svc in all_known_svcs:
+        if _is_deploy_service(svc):
+            if svc in crash_indicators and len(crash_indicators[svc]) >= 2:
+                failure_counts[svc] = failure_counts.get(svc, 0) + len(crash_indicators[svc])
 
     # Flag services that restarted 3+ times (flaky) or failed 2+ times
     flaky = [s for s, n in restart_counts.items() if n >= 3]
