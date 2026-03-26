@@ -7,20 +7,23 @@
 set -e
 
 PATTERNS=(
-    "PRIVATE_KEY"
-    "client_secret"
-    "CLIENT_SECRET"
-    "api_key"
-    "API_KEY"
-    "ANTHROPIC_API_KEY"
-    "GITHUB_CLIENT_SECRET"
-    "password\s*=\s*['\"][^'\"]{8,}"
-    "secret\s*=\s*['\"][^'\"]{8,}"
-    "token\s*=\s*['\"][^'\"]{8,}"
+    # Private key blocks (always actual secrets)
     "-----BEGIN.*PRIVATE KEY-----"
+    # Known token formats with distinctive prefixes (actual values)
     "sk-[a-zA-Z0-9]{20,}"
     "ghp_[a-zA-Z0-9]{36}"
     "ghs_[a-zA-Z0-9]{36}"
+    "xai-[a-zA-Z0-9]{20,}"
+    # Key/secret/password/token assignments with an actual value (not just name references)
+    # Matches: KEY=value, KEY='value', KEY="value" where value is 8+ chars
+    # Does NOT match: process.env.KEY, os.environ['KEY'], getenv('KEY'), etc.
+    "[A-Z_]*PRIVATE_KEY\s*=\s*['\"]?[a-zA-Z0-9/+_-]{8,}"
+    "[A-Z_]*CLIENT_SECRET\s*=\s*['\"]?[a-zA-Z0-9/+_-]{8,}"
+    "[A-Z_]*client_secret\s*=\s*['\"]?[a-zA-Z0-9/+_-]{8,}"
+    "[A-Z_a-z_]*[Aa][Pp][Ii]_[Kk][Ee][Yy]\s*=\s*['\"]?[a-zA-Z0-9/+_-]{8,}"
+    "password\s*=\s*['\"][^'\"]{8,}"
+    "secret\s*=\s*['\"][^'\"]{8,}"
+    "token\s*=\s*['\"][^'\"]{8,}"
 )
 
 if [[ "$1" == "--staged" ]]; then
@@ -32,11 +35,18 @@ else
     DIFF=$(git diff HEAD~1..HEAD 2>/dev/null || git diff --cached)
 fi
 
+# Patterns that indicate a line is a safe env var name reference, not an actual secret
+EXCLUDE_PATTERNS="process\.env\.|os\.environ|os\.getenv|getenv\(|import\.meta\.env\.|ENV\[|System\.getenv"
+
 FOUND=0
 for pattern in "${PATTERNS[@]}"; do
-    if echo "$DIFF" | grep -qE "^\+.*${pattern}" 2>/dev/null; then
+    # Skip comment-only entries (lines starting with #)
+    [[ "$pattern" == \#* ]] && continue
+    # Find matching lines, then exclude safe env var reference patterns
+    MATCHES=$(echo "$DIFF" | grep -E "^\+.*${pattern}" 2>/dev/null | grep -vE "${EXCLUDE_PATTERNS}" || true)
+    if [[ -n "$MATCHES" ]]; then
         echo "WARNING: POSSIBLE SECRET DETECTED: pattern '$pattern'"
-        echo "$DIFF" | grep -nE "^\+.*${pattern}" | head -5
+        echo "$MATCHES" | head -5
         FOUND=1
     fi
 done
