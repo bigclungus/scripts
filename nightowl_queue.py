@@ -34,20 +34,22 @@ async def main(task: str) -> None:
 
     # Try to start the workflow; ignore if already running
     try:
-        from temporalio.client import WorkflowAlreadyStartedError
-        await client.start_workflow(
+        handle = await client.start_workflow(
             "NightOwlWorkflow",
             id=WORKFLOW_ID,
             task_queue=TASK_QUEUE,
         )
-        print(f"[nightowl] Started NightOwlWorkflow (id={WORKFLOW_ID})")
-    except Exception as exc:
-        # WorkflowAlreadyStartedError means it's running — that's fine
-        print(f"[nightowl] Workflow already running (or start skipped): {exc}")
+        print(f"[nightowl] Started NightOwlWorkflow (id={WORKFLOW_ID}, run_id={handle.result_run_id})")
+    except RPCError as exc:
+        # Status code 6 = ALREADY_EXISTS — workflow is already running, that's fine
+        if exc.status.value == 6:
+            print(f"[nightowl] Workflow already running (id={WORKFLOW_ID}), will signal it")
+        else:
+            raise
 
-    # Signal the workflow to add the task
-    handle = client.get_workflow_handle(WORKFLOW_ID)
-    await handle.signal("add_task", task)
+    # Signal the workflow to add the task (use get_handle in case start returned a handle above)
+    sig_handle = client.get_workflow_handle(WORKFLOW_ID)
+    await sig_handle.signal("add_task", task)
     print(f"[nightowl] Queued task: {task!r}")
 
 
