@@ -7,8 +7,26 @@
 # Runs every 3 minutes via cron.
 
 LOG=/tmp/discord-watchdog.log
+COOLDOWN_FILE="/tmp/discord-watchdog-last-restart"
+COOLDOWN_SECS=120  # 2-minute cooldown between restarts
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+restart_bot() {
+  # Check cooldown
+  if [ -f "$COOLDOWN_FILE" ]; then
+    LAST=$(cat "$COOLDOWN_FILE")
+    NOW=$(date +%s)
+    ELAPSED=$(( NOW - LAST ))
+    if [ "$ELAPSED" -lt "$COOLDOWN_SECS" ]; then
+      echo "$(ts) SKIP restart (cooldown: ${ELAPSED}s < ${COOLDOWN_SECS}s)" >> "$LOG"
+      return
+    fi
+  fi
+  date +%s > "$COOLDOWN_FILE"
+  systemctl --user restart claude-bot.service
+  echo "$(ts) RESTART triggered, exit=$?" >> "$LOG"
+}
 
 # --- Check 1: port 9876 listening ---
 if ss -tlnH 2>/dev/null | grep -q '127.0.0.1:9876'; then
@@ -20,9 +38,10 @@ else
 fi
 
 # --- Check 2: discord bun process has active gateway connections ---
-# Find the bun process running server.ts from the discord plugin directory
-DISCORD_BUN_PID=$(pgrep -f "bun.*server\.ts" 2>/dev/null | head -1)
+# Find the bun process running the discord plugin
+DISCORD_BUN_PID=$(pgrep -f "channels/discord" | head -1)
 
+GATEWAY_CONNS=0
 if [ -n "$DISCORD_BUN_PID" ]; then
   # Discord gateway uses Cloudflare IPs (162.159.x.x) on port 443
   # Check if the process has any established connections to Discord
@@ -42,20 +61,8 @@ if [ "$PORT_UP" -eq 1 ] && [ "$GATEWAY_UP" -eq 1 ]; then
   echo "$(ts) OK port=up gateway=connected(${GATEWAY_CONNS})" >> "$LOG"
 elif [ "$PORT_UP" -eq 0 ]; then
   echo "$(ts) FAIL port=down — restarting claude-bot.service" >> "$LOG"
-  systemctl --user restart claude-bot.service
-  RESTART_RC=$?
-  if [ "$RESTART_RC" -eq 0 ]; then
-    echo "$(ts) RESTARTED claude-bot.service (port was down)" >> "$LOG"
-  else
-    echo "$(ts) ERROR restart exited with code ${RESTART_RC}" >> "$LOG"
-  fi
+  restart_bot
 elif [ "$GATEWAY_UP" -eq 0 ]; then
   echo "$(ts) FAIL gateway=disconnected (port=up, bun_pid=${DISCORD_BUN_PID}) — restarting claude-bot.service" >> "$LOG"
-  systemctl --user restart claude-bot.service
-  RESTART_RC=$?
-  if [ "$RESTART_RC" -eq 0 ]; then
-    echo "$(ts) RESTARTED claude-bot.service (gateway was disconnected)" >> "$LOG"
-  else
-    echo "$(ts) ERROR restart exited with code ${RESTART_RC}" >> "$LOG"
-  fi
+  restart_bot
 fi
