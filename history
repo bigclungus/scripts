@@ -59,44 +59,30 @@ def search(query: str, limit: int = 5, author_filter: str = None):
 
     query_emb = embed_query(client, query)
 
-    # KNN search via sqlite-vec — author filter pushed into SQL to avoid over-fetching
+    k = limit * 20 if author_filter else limit
+    rows = conn.execute(
+        """
+        SELECT
+            m.id,
+            m.message_id,
+            m.author,
+            m.channel_id,
+            m.ts,
+            m.content,
+            mv.distance
+        FROM messages_vec mv
+        JOIN messages m ON m.id = mv.rowid
+        WHERE mv.embedding MATCH ? AND k = ?
+        ORDER BY mv.distance
+        """,
+        (query_emb, k)
+    ).fetchall()
+
     if author_filter:
-        results = conn.execute(
-            """
-            SELECT
-                m.id,
-                m.message_id,
-                m.author,
-                m.channel_id,
-                m.ts,
-                m.content,
-                mv.distance
-            FROM messages_vec mv
-            JOIN messages m ON m.id = mv.rowid
-            WHERE mv.embedding MATCH ? AND k = ?
-              AND lower(m.author) LIKE lower(?)
-            ORDER BY mv.distance
-            """,
-            (query_emb, limit, f"%{author_filter}%")
-        ).fetchall()
-    else:
-        results = conn.execute(
-            """
-            SELECT
-                m.id,
-                m.message_id,
-                m.author,
-                m.channel_id,
-                m.ts,
-                m.content,
-                mv.distance
-            FROM messages_vec mv
-            JOIN messages m ON m.id = mv.rowid
-            WHERE mv.embedding MATCH ? AND k = ?
-            ORDER BY mv.distance
-            """,
-            (query_emb, limit)
-        ).fetchall()
+        rows = [r for r in rows if author_filter.lower() in r[2].lower()]
+        rows = rows[:limit]
+
+    results = rows
 
     conn.close()
 
@@ -110,7 +96,6 @@ def search(query: str, limit: int = 5, author_filter: str = None):
     for row in results:
         _, message_id, author, channel_id, ts, content, distance = row
         ts_fmt = format_ts(ts)
-        # Truncate very long messages
         if len(content) > 300:
             content = content[:297] + "..."
         print(f"[{ts_fmt}] {author}: {content}")

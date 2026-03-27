@@ -217,7 +217,6 @@ def run_ingest():
             conn.commit()
             continue
 
-        # Filter out duplicates within this batch and empty content
         seen_ids: set[str] = set()
         candidates = []
         for m in messages:
@@ -229,7 +228,6 @@ def run_ingest():
                 continue
             candidates.append(m)
 
-        # Bulk check which message_ids already exist in the DB (one query, not N)
         if candidates:
             batch_ids = [m["message_id"] for m in candidates]
             existing_ids = set(
@@ -252,7 +250,6 @@ def run_ingest():
 
         print(f"  {os.path.basename(filepath)}: {len(new_messages)} new messages")
 
-        # Embed in batches
         for i in range(0, len(new_messages), BATCH_SIZE):
             batch = new_messages[i:i + BATCH_SIZE]
             texts = [m["content"] for m in batch]
@@ -263,30 +260,27 @@ def run_ingest():
                 raise  # No silent failures
 
             for msg, emb in zip(batch, embeddings):
-                conn.execute(
+                cursor = conn.execute(
                     "INSERT OR IGNORE INTO messages (message_id, author, channel_id, ts, content) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?) RETURNING id",
                     (msg["message_id"], msg["author"], msg["channel_id"], msg["ts"], msg["content"])
                 )
-                row_id = conn.execute(
-                    "SELECT id FROM messages WHERE message_id = ?", (msg["message_id"],)
-                ).fetchone()
-                if row_id:
+                row = cursor.fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT id FROM messages WHERE message_id = ?", (msg["message_id"],)
+                    ).fetchone()
+                if row:
                     emb_bytes = sqlite_vec.serialize_float32(emb)
                     conn.execute(
                         "INSERT OR IGNORE INTO messages_vec (rowid, embedding) VALUES (?, ?)",
-                        (row_id[0], emb_bytes)
+                        (row[0], emb_bytes)
                     )
 
             conn.commit()
             total_new += len(batch)
 
-        # Update ingest state
-        conn.execute(
-            "INSERT INTO ingest_state (filepath, byte_offset, last_size) VALUES (?, ?, ?) "
-            "ON CONFLICT(filepath) DO UPDATE SET byte_offset=excluded.byte_offset, last_size=excluded.last_size",
-            (filepath, new_offset, current_size)
-        )
+        conn.execute(_UPSERT_STATE, (filepath, new_offset, current_size))
         conn.commit()
 
     total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
