@@ -20,7 +20,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-TIMELINE_PATH = "/mnt/data/hello-world/data/timeline.json"
+TIMELINE_API = "http://localhost:8081/api/timeline"
 CANDIDATES_PATH = "/mnt/data/hello-world/data/timeline-candidates.json"
 
 # Keywords that suggest a commit is "major"
@@ -152,8 +152,14 @@ def main():
     repos = get_repos()
     print(f"Found {len(repos)} repos: {', '.join(r['name'] for r in repos)}")
 
-    # Build dedup sets from existing data
-    timeline = load_json(TIMELINE_PATH)
+    # Build dedup sets from existing data (fetch from API)
+    try:
+        import urllib.request
+        with urllib.request.urlopen(TIMELINE_API, timeout=10) as resp:
+            timeline = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"WARNING: could not fetch timeline from API ({e}), using empty list")
+        timeline = []
     existing_candidates = load_json(CANDIDATES_PATH)
 
     existing_urls = set()

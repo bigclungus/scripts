@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-timeline_add.py -- Add a timeline entry directly (used by [timeline] Discord trigger).
+timeline_add.py -- Add a timeline entry via the clunger API.
 
 Usage:
   python3 /mnt/data/scripts/timeline_add.py "Launched the thing" --category feature --url https://...
@@ -11,11 +11,12 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timezone
 
-TIMELINE_PATH = "/mnt/data/hello-world/data/timeline.json"
+API_BASE = "http://localhost:8081"
+INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 
 CATEGORY_KEYWORDS = {
     "infrastructure": re.compile(r"\b(infra|deploy|server|service|proxy|auth|migrate|tunnel|docker|systemd)\b", re.I),
@@ -33,6 +34,20 @@ def auto_categorize(text: str) -> str:
     return "milestone"
 
 
+def load_internal_token() -> str:
+    """Try to load INTERNAL_TOKEN from clunger's .env if not in environment."""
+    if INTERNAL_TOKEN:
+        return INTERNAL_TOKEN
+    env_path = "/mnt/data/clunger/.env"
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("INTERNAL_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="Add a timeline entry")
     parser.add_argument("description", help="Event description (becomes title)")
@@ -41,15 +56,7 @@ def main():
     parser.add_argument("--source", default="manual", choices=["manual", "discord", "git"], help="Provenance")
     parser.add_argument("--date", default=None, help="ISO date (default: now)")
     parser.add_argument("--icon", default=None, help="Lucide icon name")
-    parser.add_argument("--no-push", action="store_true", help="Skip git commit/push")
     args = parser.parse_args()
-
-    # Load existing timeline
-    if os.path.exists(TIMELINE_PATH):
-        with open(TIMELINE_PATH) as f:
-            timeline = json.load(f)
-    else:
-        timeline = []
 
     category = args.category or auto_categorize(args.description)
     date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -66,28 +73,31 @@ def main():
     if args.icon:
         entry["icon"] = args.icon
 
-    timeline.append(entry)
-    timeline.sort(key=lambda x: x.get("date", ""))
+    token = load_internal_token()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Internal-Token"] = token
 
-    with open(TIMELINE_PATH, "w") as f:
-        json.dump(timeline, f, indent=2)
+    data = json.dumps(entry).encode("utf-8")
+    req = urllib.request.Request(
+        f"{API_BASE}/api/timeline",
+        data=data,
+        headers=headers,
+        method="POST",
+    )
 
-    print(f"Added timeline entry: {args.description}")
-    print(f"  category: {category}, source: {args.source}, date: {date}")
-
-    if not args.no_push:
-        cwd = "/mnt/data/hello-world"
-        subprocess.run(["git", "add", "data/timeline.json"], cwd=cwd, check=True)
-        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=cwd)
-        if result.returncode != 0:
-            subprocess.run(
-                ["git", "commit", "-m", f"timeline: {args.description[:60]}"],
-                cwd=cwd, check=True,
-            )
-            subprocess.run(["git", "push"], cwd=cwd, check=True)
-            print("Committed and pushed.")
-
-    return entry
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            print(f"Added timeline entry (id={result.get('id')}): {args.description}")
+            print(f"  category: {category}, source: {args.source}, date: {date}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"ERROR: HTTP {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

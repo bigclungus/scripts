@@ -3,11 +3,10 @@
 timeline_approve.py -- Review and approve/reject timeline candidates.
 
 Reads from /mnt/data/hello-world/data/timeline-candidates.json,
-merges approved entries into /mnt/data/hello-world/data/timeline.json,
+posts approved entries to the clunger timeline API,
 and removes processed candidates.
 
 Usage:
-  python3 /mnt/data/scripts/timeline_approve.py                # interactive review
   python3 /mnt/data/scripts/timeline_approve.py --approve-all  # approve everything
   python3 /mnt/data/scripts/timeline_approve.py --list         # list candidates without acting
   python3 /mnt/data/scripts/timeline_approve.py --approve 0 2  # approve by index
@@ -17,11 +16,11 @@ Usage:
 import argparse
 import json
 import os
-import subprocess
 import sys
+import urllib.request
 
-TIMELINE_PATH = "/mnt/data/hello-world/data/timeline.json"
 CANDIDATES_PATH = "/mnt/data/hello-world/data/timeline-candidates.json"
+API_BASE = "http://localhost:8081"
 
 
 def load_json(path: str) -> list[dict]:
@@ -37,30 +36,46 @@ def save_json(path: str, data: list[dict]) -> None:
     print(f"Saved {len(data)} entries to {path}")
 
 
-def merge_into_timeline(timeline: list[dict], approved: list[dict]) -> list[dict]:
-    """Merge approved candidates into timeline, stripping ingestion-only fields."""
+def load_internal_token() -> str:
+    token = os.environ.get("INTERNAL_TOKEN", "")
+    if token:
+        return token
+    env_path = "/mnt/data/clunger/.env"
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("INTERNAL_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def post_to_api(entry: dict, token: str) -> dict | None:
+    """Post an approved timeline entry to the clunger API."""
     strip_fields = {"repo", "reason", "sha"}
-    for entry in approved:
-        clean = {k: v for k, v in entry.items() if k not in strip_fields}
-        timeline.append(clean)
-    timeline.sort(key=lambda x: x.get("date", ""))
-    return timeline
+    clean = {k: v for k, v in entry.items() if k not in strip_fields}
 
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Internal-Token"] = token
 
-def commit_and_push():
-    """Commit and push timeline.json changes."""
-    cwd = "/mnt/data/hello-world"
-    subprocess.run(["git", "add", "data/timeline.json"], cwd=cwd, check=True)
-    result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=cwd)
-    if result.returncode == 0:
-        print("No changes to commit.")
-        return
-    subprocess.run(
-        ["git", "commit", "-m", "timeline: add approved entries from ingestion"],
-        cwd=cwd, check=True,
+    data = json.dumps(clean).encode("utf-8")
+    req = urllib.request.Request(
+        f"{API_BASE}/api/timeline",
+        data=data,
+        headers=headers,
+        method="POST",
     )
-    subprocess.run(["git", "push"], cwd=cwd, check=True)
-    print("Committed and pushed timeline.json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"  ERROR posting entry: HTTP {e.code}: {body}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"  ERROR posting entry: {e}", file=sys.stderr)
+        return None
 
 
 def display_candidates(candidates: list[dict]) -> None:
@@ -86,7 +101,6 @@ def main():
     parser.add_argument("--approve-all", action="store_true", help="Approve all candidates")
     parser.add_argument("--approve", nargs="+", type=int, metavar="IDX", help="Approve by index")
     parser.add_argument("--reject", nargs="+", type=int, metavar="IDX", help="Reject by index")
-    parser.add_argument("--no-push", action="store_true", help="Skip git commit/push")
     args = parser.parse_args()
 
     candidates = load_json(CANDIDATES_PATH)
@@ -116,42 +130,27 @@ def main():
             if i not in approve_set and i not in reject_set
         ]
     else:
-        # Interactive mode
-        approved = []
-        remaining = []
-        for i, c in enumerate(candidates):
-            while True:
-                choice = input(f"[{i}] {c.get('title', '?')[:60]} (a)pprove / (r)eject / (s)kip / (e)dit title? ").strip().lower()
-                if choice in ("a", "approve"):
-                    approved.append(c)
-                    break
-                elif choice in ("r", "reject"):
-                    break  # drop it
-                elif choice in ("s", "skip"):
-                    remaining.append(c)
-                    break
-                elif choice in ("e", "edit"):
-                    new_title = input("  New title: ").strip()
-                    if new_title:
-                        c["title"] = new_title
-                    new_desc = input("  New description (enter to keep): ").strip()
-                    if new_desc:
-                        c["description"] = new_desc
-                    approved.append(c)
-                    break
+        # Non-interactive: list only
+        print("Use --approve-all, --approve <idx>, or --reject <idx>")
+        return
 
     print(f"\nApproved: {len(approved)}, Remaining: {len(remaining)}")
 
-    if approved:
-        timeline = load_json(TIMELINE_PATH)
-        timeline = merge_into_timeline(timeline, approved)
-        save_json(TIMELINE_PATH, timeline)
+    token = load_internal_token()
+    posted = 0
+    for entry in approved:
+        result = post_to_api(entry, token)
+        if result:
+            posted += 1
+            print(f"  Posted: {entry.get('title', '?')[:60]} (id={result.get('id')})")
+        else:
+            # On failure, keep it in remaining so it can be retried
+            remaining.append(entry)
+
+    print(f"\nPosted {posted}/{len(approved)} entries to API")
 
     # Write back remaining candidates
     save_json(CANDIDATES_PATH, remaining)
-
-    if approved and not args.no_push:
-        commit_and_push()
 
 
 if __name__ == "__main__":
