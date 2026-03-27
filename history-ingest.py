@@ -15,39 +15,18 @@ from datetime import datetime
 import sqlite_vec
 from openai import OpenAI
 
-DB_PATH = "/mnt/data/data/discord-history.db"
+from common import DB_PATH, EMBED_MODEL, EMBED_DIMS, get_openai_key
+
 JSONL_GLOB = "/home/clungus/.claude/projects/-mnt-data/*.jsonl"
-EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIMS = 1536
 BATCH_SIZE = 100
 
-
-def get_openai_key() -> str:
-    key = os.environ.get("OPENAI_API_KEY")
-    if key:
-        return key
-
-    env_files = [
-        "/mnt/data/temporal-workflows/.env",
-        "/mnt/data/.env",
-        "/home/clungus/.claude/channels/discord/.env",
-    ]
-    for path in env_files:
-        if os.path.exists(path):
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("OPENAI_API_KEY="):
-                        val = line.split("=", 1)[1].strip()
-                        if val:
-                            return val
-
-    print("ERROR: OPENAI_API_KEY not found in environment or any known .env files.", file=sys.stderr)
-    print("  Checked: OPENAI_API_KEY env var, /mnt/data/temporal-workflows/.env, /mnt/data/.env, discord .env", file=sys.stderr)
-    sys.exit(1)
+_UPSERT_STATE = (
+    "INSERT INTO ingest_state (filepath, byte_offset, last_size) VALUES (?, ?, ?) "
+    "ON CONFLICT(filepath) DO UPDATE SET byte_offset=excluded.byte_offset, last_size=excluded.last_size"
+)
 
 
-def open_db(api_key: str) -> sqlite3.Connection:
+def open_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -203,7 +182,7 @@ def embed_batch(client: OpenAI, texts: list[str]) -> list[list[float]]:
 def run_ingest():
     api_key = get_openai_key()
     client = OpenAI(api_key=api_key)
-    conn = open_db(api_key)
+    conn = open_db()
 
     jsonl_files = sorted(glob.glob(JSONL_GLOB))
     print(f"Found {len(jsonl_files)} JSONL files")
@@ -232,34 +211,40 @@ def run_ingest():
         if not messages:
             # Update state even if no messages found (file grew but had no Discord content)
             conn.execute(
-                "INSERT INTO ingest_state (filepath, byte_offset, last_size) VALUES (?, ?, ?) "
-                "ON CONFLICT(filepath) DO UPDATE SET byte_offset=excluded.byte_offset, last_size=excluded.last_size",
+                _UPSERT_STATE,
                 (filepath, new_offset, current_size)
             )
             conn.commit()
             continue
 
-        # Filter out already-known message_ids, empty content, and deduplicate within this batch
-        new_messages = []
-        seen_ids = set()
+        # Filter out duplicates within this batch and empty content
+        seen_ids: set[str] = set()
+        candidates = []
         for m in messages:
             mid = m["message_id"]
             if mid in seen_ids:
                 continue
             seen_ids.add(mid)
-            # Skip empty or whitespace-only content
             if not m.get("content", "").strip():
                 continue
-            exists = conn.execute(
-                "SELECT 1 FROM messages WHERE message_id = ?", (mid,)
-            ).fetchone()
-            if not exists:
-                new_messages.append(m)
+            candidates.append(m)
+
+        # Bulk check which message_ids already exist in the DB (one query, not N)
+        if candidates:
+            batch_ids = [m["message_id"] for m in candidates]
+            existing_ids = set(
+                row[0] for row in conn.execute(
+                    f"SELECT message_id FROM messages WHERE message_id IN ({','.join('?' * len(batch_ids))})",
+                    batch_ids
+                ).fetchall()
+            )
+            new_messages = [m for m in candidates if m["message_id"] not in existing_ids]
+        else:
+            new_messages = []
 
         if not new_messages:
             conn.execute(
-                "INSERT INTO ingest_state (filepath, byte_offset, last_size) VALUES (?, ?, ?) "
-                "ON CONFLICT(filepath) DO UPDATE SET byte_offset=excluded.byte_offset, last_size=excluded.last_size",
+                _UPSERT_STATE,
                 (filepath, new_offset, current_size)
             )
             conn.commit()
@@ -288,15 +273,10 @@ def run_ingest():
                 ).fetchone()
                 if row_id:
                     emb_bytes = sqlite_vec.serialize_float32(emb)
-                    # Check if vec row exists
-                    vec_exists = conn.execute(
-                        "SELECT rowid FROM messages_vec WHERE rowid = ?", (row_id[0],)
-                    ).fetchone()
-                    if not vec_exists:
-                        conn.execute(
-                            "INSERT INTO messages_vec (rowid, embedding) VALUES (?, ?)",
-                            (row_id[0], emb_bytes)
-                        )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO messages_vec (rowid, embedding) VALUES (?, ?)",
+                        (row_id[0], emb_bytes)
+                    )
 
             conn.commit()
             total_new += len(batch)
