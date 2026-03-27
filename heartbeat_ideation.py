@@ -233,7 +233,14 @@ def is_duplicate_finding(finding: str) -> bool:
     suppressing findings forever just because a similar issue was once closed
     long ago.
     """
-    search_term = finding[:60].strip()
+    # Build a stable search term that matches across different run-counts and wordings:
+    #   1. Take only the part before the em-dash (the "what" half, not the "action" hint)
+    #      because GitHub search chokes on em-dashes in query strings.
+    #   2. Strip numeric counts (e.g. "2x", "18x") so a change in count doesn't prevent
+    #      matching a previously-filed issue (e.g. "failed 4x" matches "failed 2x").
+    #   3. Collapse whitespace left by the stripping and truncate for safety.
+    base = finding.split("—")[0] if "—" in finding else finding[:80]
+    search_term = re.sub(r"\s+", " ", re.sub(r"\d+x\b", "", base)).strip()[:60].strip()
     repo = "bigclungus/bigclungus-meta"
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     base_cmd = [
