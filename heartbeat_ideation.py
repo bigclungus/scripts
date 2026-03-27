@@ -13,6 +13,8 @@ Findings are used to fire a Congress with topic:
 import subprocess
 import re
 import sys
+import json
+from datetime import datetime, timezone, timedelta
 
 
 def check_flaky_services() -> str | None:
@@ -226,19 +228,24 @@ def is_duplicate_finding(finding: str) -> bool:
 
     Uses a simple keyword search: the first ~60 chars of the finding are used
     as the query so minor wording differences still match.
+
+    For closed issues, createdAt is checked against a 7-day window to avoid
+    suppressing findings forever just because a similar issue was once closed
+    long ago.
     """
     search_term = finding[:60].strip()
     repo = "bigclungus/bigclungus-meta"
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     base_cmd = [
         "gh", "issue", "list",
         "--repo", repo,
         "--label", "idea",
         "--search", search_term,
-        "--json", "number,title",
+        "--json", "number,title,createdAt,state",
         "--limit", "10",
     ]
 
-    # 1. Check open issues
+    # 1. Check open issues — any match suppresses (open = still being tracked)
     open_result = subprocess.run(
         base_cmd + ["--state", "open"],
         capture_output=True, text=True, timeout=20
@@ -246,18 +253,38 @@ def is_duplicate_finding(finding: str) -> bool:
     if open_result.returncode != 0:
         # gh not available or auth error — don't block the finding
         return False
-    if open_result.stdout.strip() not in ("", "[]"):
-        return True  # duplicate found in open issues
+    raw = open_result.stdout.strip()
+    if raw and raw != "[]":
+        try:
+            issues = json.loads(raw)
+            if issues:
+                return True  # duplicate found in open issues
+        except json.JSONDecodeError:
+            pass
 
-    # 2. Check recently-closed issues (last 7 days)
+    # 2. Check recently-closed issues — only suppress if closed within last 7 days
     closed_result = subprocess.run(
         base_cmd + ["--state", "closed"],
         capture_output=True, text=True, timeout=20
     )
     if closed_result.returncode != 0:
         return False
-    if closed_result.stdout.strip() not in ("", "[]"):
-        return True  # duplicate found in recently-closed issues
+    raw = closed_result.stdout.strip()
+    if raw and raw != "[]":
+        try:
+            issues = json.loads(raw)
+            for issue in issues:
+                created_str = issue.get("createdAt", "")
+                if not created_str:
+                    continue
+                try:
+                    created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if created_at >= cutoff:
+                    return True  # duplicate found in recently-closed issues (within 7 days)
+        except json.JSONDecodeError:
+            pass
 
     return False
 
