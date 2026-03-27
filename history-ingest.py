@@ -23,7 +23,7 @@ from openai import OpenAI
 
 from common import DB_PATH, EMBED_MODEL, EMBED_DIMS, get_openai_key
 
-JSONL_GLOB = "/home/clungus/.claude/projects/-mnt-data/*.jsonl"
+JSONL_GLOB = "/home/clungus/.claude/projects/*/*.jsonl"
 BATCH_SIZE = 100
 
 IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
