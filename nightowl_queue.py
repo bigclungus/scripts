@@ -21,6 +21,7 @@ load_dotenv(Path(__file__).parent.parent / "temporal-workflows" / ".env")
 
 import os
 from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 
@@ -40,12 +41,10 @@ async def main(task: str) -> None:
             task_queue=TASK_QUEUE,
         )
         print(f"[nightowl] Started NightOwlWorkflow (id={WORKFLOW_ID}, run_id={handle.result_run_id})")
-    except RPCError as exc:
-        # Status code 6 = ALREADY_EXISTS — workflow is already running, that's fine
-        if exc.status.value == 6:
-            print(f"[nightowl] Workflow already running (id={WORKFLOW_ID}), will signal it")
-        else:
+    except (WorkflowAlreadyStartedError, RPCError) as exc:
+        if isinstance(exc, RPCError) and exc.status.value != 6:
             raise
+        print(f"[nightowl] Workflow already running (id={WORKFLOW_ID}), will signal it")
 
     # Signal the workflow to add the task (use get_handle in case start returned a handle above)
     sig_handle = client.get_workflow_handle(WORKFLOW_ID)
@@ -58,4 +57,8 @@ if __name__ == "__main__":
         print("Usage: python3 nightowl_queue.py <task description>", file=sys.stderr)
         sys.exit(1)
     task_arg = " ".join(sys.argv[1:])
+    if task_arg.startswith("-"):
+        print(f"Error: task description cannot start with '-' (got {task_arg!r}). Did you mean to pass a flag?", file=sys.stderr)
+        print("Usage: python3 nightowl_queue.py <task description>", file=sys.stderr)
+        sys.exit(1)
     asyncio.run(main(task_arg))
