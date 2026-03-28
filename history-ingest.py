@@ -69,7 +69,7 @@ def open_db() -> sqlite3.Connection:
 # ---- Parsers ----------------------------------------------------------------
 
 _CHANNEL_RE = re.compile(
-    r'<channel\s+source="plugin:discord:discord"\s+'
+    r'<channel\s+source="plugin:discord[^"]*"\s+'
     r'chat_id="([^"]+)"\s+'
     r'message_id="([^"]+)"\s+'
     r'user="([^"]+)"[^>]*?ts="([^"]+)"[^>]*?>(.*?)</channel>',
