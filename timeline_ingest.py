@@ -130,12 +130,34 @@ def is_notable(message: str, is_tagged: bool, is_first: bool) -> tuple[bool, str
     if first_line.startswith("simplify:"):
         return False, ""
 
+    # Skip conventional commit prefixes for non-feature work
+    lower = first_line.lower()
+    for prefix in ("fix:", "refactor:", "chore:", "docs:", "style:", "test:"):
+        if lower.startswith(prefix):
+            return False, ""
+
     if is_first:
         return True, "first commit in repo"
     if is_tagged:
         return True, "tagged release"
-    if MAJOR_KEYWORDS.search(first_line):
-        return True, f"keyword match"
+
+    # Only search for keywords in the first ~50 chars of the message
+    search_window = first_line[:50]
+
+    # "add" is too broad -- only match when it's the first word (after optional feat: prefix)
+    stripped = re.sub(r"^feat:\s*", "", search_window, flags=re.IGNORECASE).strip()
+    if re.match(r"(?i)^add\b", stripped):
+        return True, "keyword match"
+
+    # For all other major keywords, match within the first 50 chars
+    # but exclude "add" from the general search since we handled it above
+    other_keywords = re.compile(
+        r"\b(create|implement|launch|initial|introduce|new|ship|deploy|migrate|"
+        r"overhaul|rewrite|redesign|replace)\b",
+        re.IGNORECASE,
+    )
+    if other_keywords.search(search_window):
+        return True, "keyword match"
 
     return False, ""
 
