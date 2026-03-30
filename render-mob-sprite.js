@@ -35,10 +35,6 @@ process.stdin.on('end', () => {
   const canvas = createCanvas(64, 64);
   const ctx = canvas.getContext('2d');
 
-  // Fill background black (transparent would also work, but black matches the game aesthetic)
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, 64, 64);
-
   // Evaluate the sprite function in a sandboxed scope.
   // The function only uses ctx.fillStyle and ctx.fillRect so this is safe.
   // We stub `window` to absorb the window.drawSprite_X = drawSprite_X registration line.
