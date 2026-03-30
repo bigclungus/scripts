@@ -7,15 +7,14 @@ EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
     # Alert Discord via inject endpoint
-    SECRET=$(grep DISCORD_INJECT_SECRET /home/clungus/.claude/channels/discord/.env | cut -d= -f2-)
     python3 -c "
 import urllib.request, json, sys
 msg = '🚨 **Integration tests FAILED**\n\`\`\`\n' + sys.argv[1][:1500] + '\n\`\`\`'
-req = urllib.request.Request('http://127.0.0.1:9876/inject',
+req = urllib.request.Request('http://127.0.0.1:8085/webhooks/bigclungus-main',
   data=json.dumps({'content': msg, 'chat_id': '1485343472952148008', 'user': 'integration-test'}).encode(),
-  headers={'Content-Type': 'application/json', 'x-inject-secret': sys.argv[2]}, method='POST')
+  headers={'Content-Type': 'application/json'}, method='POST')
 urllib.request.urlopen(req, timeout=5)
-" "$OUTPUT" "$SECRET"
+" "$OUTPUT"
 fi
 
 exit $EXIT_CODE

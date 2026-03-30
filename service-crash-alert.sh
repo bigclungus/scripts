@@ -16,17 +16,12 @@ if [ -z "$SERVICE_RESULT" ] && [ "$EXIT_CODE" = "0" ]; then
     exit 0
 fi
 
-SECRET=$(grep DISCORD_INJECT_SECRET /home/clungus/.claude/channels/discord/.env | cut -d= -f2- 2>/dev/null)
-if [ -z "$SECRET" ]; then
-    exit 0
-fi
-
 python3 -c "
 import urllib.request, json, sys
-service, exit_code, result, secret = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+service, exit_code, result = sys.argv[1], sys.argv[2], sys.argv[3]
 msg = f'⚠️ service crash: {service} stopped unexpectedly (exit_code={exit_code or \"?\"}, result={result or \"?\"}) — investigate and restart if needed.'
-req = urllib.request.Request('http://127.0.0.1:9876/inject',
+req = urllib.request.Request('http://127.0.0.1:8085/webhooks/bigclungus-main',
   data=json.dumps({'content': msg, 'chat_id': '1485343472952148008', 'user': 'system-monitor'}).encode(),
-  headers={'Content-Type': 'application/json', 'x-inject-secret': secret}, method='POST')
+  headers={'Content-Type': 'application/json'}, method='POST')
 urllib.request.urlopen(req, timeout=5)
-" "$SERVICE" "$EXIT_CODE" "$SERVICE_RESULT" "$SECRET"
+" "$SERVICE" "$EXIT_CODE" "$SERVICE_RESULT"

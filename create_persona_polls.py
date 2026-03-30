@@ -378,19 +378,6 @@ def create_sprite_poll(slug: str, persona: dict, sprite_code: str) -> str:
 
 def notify_discord(slug: str, display_name: str):
     """Post Discord notification via inject endpoint."""
-    secret_path = "/home/clungus/.claude/channels/discord/.env"
-    secret = ""
-    if os.path.exists(secret_path):
-        with open(secret_path) as f:
-            for line in f:
-                if line.startswith("DISCORD_INJECT_SECRET="):
-                    secret = line.split("=", 1)[1].strip()
-                    break
-
-    if not secret:
-        print("[notify] WARNING: No DISCORD_INJECT_SECRET found, skipping Discord notification", file=sys.stderr)
-        return
-
     message = (
         f"New persona **{display_name}** (`{slug}`) has been created.\n"
         f"Avatar and sprite polls are now open at https://clung.us/refinery\n"
@@ -405,11 +392,10 @@ def notify_discord(slug: str, display_name: str):
     }).encode()
 
     req = urllib.request.Request(
-        "http://127.0.0.1:9876/inject",
+        "http://127.0.0.1:8085/webhooks/bigclungus-main",
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "x-inject-secret": secret,
         },
         method="POST",
     )
