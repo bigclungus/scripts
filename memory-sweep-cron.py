@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-memory-sweep-cron.py -- Pick the oldest unverified memory file and inject a sweep request.
+memory-sweep-cron.py -- Inject a sweep request for every stale memory file.
 
-Runs daily via systemd timer. Picks the single most stale file (>1 day old,
-not verified in >7 days) and injects a [memory-sweep] message via omni webhook.
+Runs every 4 hours via systemd timer. Sends a [memory-sweep] message for each
+file that is:
+  - >1 day old (by mtime)
+  - not verified in the last 24 hours (by "last verified" tag in content, else mtime)
+  - not already checked today (tracked in /tmp/memory-sweep-checked.json)
+
 Exits silently if nothing qualifies -- no spam.
 """
 
@@ -17,12 +21,12 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 MEMORY_DIR = Path("/home/clungus/.claude/projects/-mnt-data/memory")
-LOCK_FILE = Path("/tmp/memory-sweep.lock")
+CHECKED_FILE = Path("/tmp/memory-sweep-checked.json")
 OMNI_WEBHOOK = "http://127.0.0.1:8085/webhooks/bigclungus-main"
 
 # Thresholds
-MIN_AGE_DAYS = 1       # file must be at least this old (by mtime or creation)
-MIN_STALE_DAYS = 7     # file must not have been verified within this many days
+MIN_AGE_DAYS = 1       # file must be at least this old (by mtime)
+MIN_STALE_HOURS = 24   # file must not have been verified within this window
 
 
 def parse_verified_date(content: str) -> datetime | None:
@@ -53,84 +57,96 @@ def get_staleness_date(path: Path, content: str) -> datetime:
     return datetime.fromtimestamp(mtime, tz=timezone.utc)
 
 
+def load_checked_today() -> set:
+    """
+    Load the set of filenames already injected today.
+    Clears the file if it's from a previous UTC day.
+    """
+    today = datetime.now(tz=timezone.utc).date().isoformat()
+    if not CHECKED_FILE.exists():
+        return set()
+    try:
+        data = json.loads(CHECKED_FILE.read_text())
+        if data.get("date") != today:
+            return set()
+        return set(data.get("files", []))
+    except (json.JSONDecodeError, KeyError):
+        return set()
+
+
+def save_checked_today(filenames: set) -> None:
+    today = datetime.now(tz=timezone.utc).date().isoformat()
+    CHECKED_FILE.write_text(json.dumps({"date": today, "files": sorted(filenames)}))
+
+
+def inject(filename: str, content: str) -> None:
+    payload = {
+        "content": f"[memory-sweep] file={filename}\n\nMEMORY CONTENT:\n{content}",
+        "user": "memory-sweeper",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        OMNI_WEBHOOK,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        status = resp.status
+        if status not in (200, 201, 202, 204):
+            raise RuntimeError(f"Unexpected HTTP status from omni webhook: {status}")
+
+
 def main() -> None:
     now = datetime.now(tz=timezone.utc)
+    checked_today = load_checked_today()
 
-    # Lock check -- don't overlap runs
-    if LOCK_FILE.exists():
-        lock_age = now - datetime.fromtimestamp(LOCK_FILE.stat().st_mtime, tz=timezone.utc)
-        if lock_age < timedelta(hours=2):
-            print("Lock file exists and is recent -- another sweep is in progress. Exiting.")
-            sys.exit(0)
-        else:
-            # Stale lock (>2h) -- remove and continue
-            LOCK_FILE.unlink()
-
-    # Collect candidates
-    candidates: list[tuple[datetime, Path, str]] = []
+    candidates = []  # list of (filename, content)
 
     for path in sorted(MEMORY_DIR.glob("*.md")):
         if path.name == "MEMORY.md":
             continue
 
+        # Skip if already injected today
+        if path.name in checked_today:
+            continue
+
         content = path.read_text(encoding="utf-8")
-        staleness_date = get_staleness_date(path, content)
         file_age = now - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
 
         # File must exist for at least MIN_AGE_DAYS
         if file_age < timedelta(days=MIN_AGE_DAYS):
             continue
 
-        # Staleness date must be >MIN_STALE_DAYS ago
-        if (now - staleness_date) < timedelta(days=MIN_STALE_DAYS):
+        staleness_date = get_staleness_date(path, content)
+
+        # Must not have been verified within the last 24 hours
+        if (now - staleness_date) < timedelta(hours=MIN_STALE_HOURS):
             continue
 
-        candidates.append((staleness_date, path, content))
+        candidates.append((path.name, content))
 
     if not candidates:
-        # Nothing stale enough -- exit silently
         sys.exit(0)
 
-    # Pick the most stale file (oldest staleness_date)
-    candidates.sort(key=lambda x: x[0])
-    staleness_date, chosen_path, content = candidates[0]
+    newly_checked = set()
+    errors = []
 
-    # Acquire lock
-    LOCK_FILE.write_text(str(os.getpid()))
+    for filename, content in candidates:
+        try:
+            inject(filename, content)
+            newly_checked.add(filename)
+            print(f"Injected memory-sweep for: {filename}")
+        except urllib.error.URLError as e:
+            errors.append(f"{filename}: failed to reach omni webhook: {e}")
+        except Exception as e:
+            errors.append(f"{filename}: {e}")
 
-    try:
-        payload = {
-            "content": f"[memory-sweep] file={chosen_path.name}\n\nMEMORY CONTENT:\n{content}",
-            "user": "memory-sweeper",
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            OMNI_WEBHOOK,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            status = resp.status
-            if status not in (200, 201, 202, 204):
-                raise RuntimeError(f"Unexpected HTTP status from omni webhook: {status}")
+    # Persist the updated checked set (merge with existing)
+    save_checked_today(checked_today | newly_checked)
 
-        print(f"Injected memory-sweep for: {chosen_path.name} (last verified: {staleness_date.date()})")
-
-    except urllib.error.URLError as e:
-        # Remove lock so we can retry
-        LOCK_FILE.unlink(missing_ok=True)
-        raise RuntimeError(f"Failed to reach omni webhook at {OMNI_WEBHOOK}: {e}") from e
-    except Exception:
-        LOCK_FILE.unlink(missing_ok=True)
-        raise
-
-    # Note: lock is intentionally NOT removed here.
-    # BigClungus's sweep handler removes it when verification is complete.
-    # This prevents back-to-back sweeps of the same file if the cron fires again
-    # before the agent finishes. The handler should call:
-    #   rm -f /tmp/memory-sweep.lock
-    # after writing the verified line back to the file.
+    if errors:
+        raise RuntimeError("Some sweeps failed:\n" + "\n".join(errors))
 
 
 if __name__ == "__main__":
