@@ -57,6 +57,12 @@ def main():
 
         # Collect evolution notes from personas, if any
         evolution = d.get("evolution", {})
+        if isinstance(evolution, str):
+            import json as _json
+            try:
+                evolution = _json.loads(evolution)
+            except Exception:
+                evolution = {}
         evolved = evolution.get("evolved", [])
         evolution_notes = ""
         if evolved:

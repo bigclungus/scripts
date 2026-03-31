@@ -23,6 +23,28 @@ from datetime import datetime, timedelta, timezone
 TIMELINE_API = "http://localhost:8081/api/timeline"
 CANDIDATES_PATH = "/mnt/data/hello-world/data/timeline-candidates.json"
 
+# ---------------------------------------------------------------------------
+# Ingest criteria — what gets auto-staged vs. skipped
+#
+# AUTO-INGEST (keep):
+#   - New persona creations ("add <name> persona")
+#   - New user-facing pages, labs, or sites (initial commit / launch)
+#   - First use of a major technology or system (Temporal, Graphiti, Pepe, etc.)
+#   - Notable incidents or succession events
+#   - Major architectural milestones (rewrites, platform migrations)
+#
+# SKIP (do not ingest):
+#   - Library swaps or dependency upgrades
+#   - Internal API / REST endpoint additions with no user-visible effect
+#   - DB migration scripts and schema changes
+#   - Config file changes and environment variable tweaks
+#   - systemd unit additions or modifications
+#   - Feature flags and UI checkboxes for existing features
+#   - Small visual tweaks or minor UX polish
+#   - Internal refactors with no user-visible change
+#   - Duplicate commits that cover the same event as an existing entry
+# ---------------------------------------------------------------------------
+
 # Keywords that suggest a commit is "major"
 MAJOR_KEYWORDS = re.compile(
     r"\b(add|create|implement|launch|initial|introduce|new|ship|deploy|migrate|"
@@ -37,6 +59,34 @@ CATEGORY_KEYWORDS = {
     "labs": re.compile(r"\b(lab|experiment)\b", re.I),
     "feature": re.compile(r"\b(feature|add|implement|create|new|introduce|ship)\b", re.I),
 }
+
+# Patterns that indicate commits that should be SKIPPED even if they match major keywords.
+# These are things that are too granular or internal to warrant a timeline entry.
+SKIP_PATTERNS = re.compile(
+    r"\b(endpoint|endpoints|migration|migrate.*script|sqlite.*store|db.*store|"
+    r"systemd|\.service\b|feature.flag|checkbox|fallback|viewport|culling|"
+    r"hover.*label|edge.*label|source.link|inject.proxy|inject.service|"
+    r"restart.*workflow|restart.*hourly|skipGen|skip.*gen|cached.mob|mob.*fallback|"
+    r"mob.*sprite|countdown.screen|mob.*preview|render.*mob|"
+    r"PersonaService|AgentService|TaskService|WalletService|auth.middleware|"
+    r"replace.*vis-network|vis-network.*replace|sigma\.js|webgl.*graph|"
+    r"auto-poll.*create|hook.*create.*directive|"
+    r"timeline.*sqlite|timeline.*api.*endpoint|timeline.*json.*file|"
+    # Infrastructure / internal tooling patterns
+    r"cron\.py|cron-|\.cron\b|cron.*script|"
+    r"\.env\b|env.*file|config.*file|config.*fix|"
+    r"trigger.*handler|TRIGGERS\.md|triggers\.md|"
+    r"ingest.*script|ingest.*system|ingestion.*script|"
+    r"routing.*alongside|routing.*fix|routing.*update|"
+    r"temporal.*schedule|temporal.*worker|temporal.*activity|"
+    r"persistence.*api|persist.*clunger|"
+    r"split rewrite|split.*refactor|rewrite.*split|"
+    r"stale.*memory|memory.*sweep|memory.*verif|"
+    r"watchdog|sweeper|heartbeat.*cron|"
+    r"\.gitignore|scrub.*git|git.*history|credentials.*git|"
+    r"internal.*tool|internal.*script|admin.*script)\b",
+    re.IGNORECASE,
+)
 
 
 def run(cmd: list[str], cwd: str | None = None, timeout: int = 60) -> str:
@@ -118,7 +168,13 @@ def load_json(path: str) -> list[dict]:
 
 
 def is_notable(message: str, is_tagged: bool, is_first: bool) -> tuple[bool, str]:
-    """Determine if a commit is notable enough for the timeline."""
+    """Determine if a commit is notable enough for the timeline.
+
+    Applies the ingest criteria defined in SKIP_PATTERNS above:
+    - Persona creations, new user-facing features, major tech introductions pass.
+    - Library swaps, API endpoint additions, DB migrations, systemd units,
+      config changes, feature flags, and minor tweaks are skipped.
+    """
     first_line = message.split("\n")[0].strip()
 
     # Skip merge commits and trivial stuff
@@ -132,9 +188,26 @@ def is_notable(message: str, is_tagged: bool, is_first: bool) -> tuple[bool, str
 
     # Skip conventional commit prefixes for non-feature work
     lower = first_line.lower()
-    for prefix in ("fix:", "refactor:", "chore:", "docs:", "style:", "test:"):
+    for prefix in ("fix:", "refactor:", "chore:", "docs:", "style:", "test:", "ci:", "build:", "perf:", "cleanup:"):
         if lower.startswith(prefix):
             return False, ""
+
+    # Skip commits that look like infrastructure/tooling even without a prefix
+    infra_phrases = (
+        "cron script", "cron job", "config fix", "env file", ".env",
+        "trigger handler", "ingest script", "ingest system",
+        "temporal schedule", "temporal worker",
+        "routing fix", "routing update", "routing alongside",
+        "persistence migration", "stale memory", "memory sweep",
+        "watchdog", "hook handler", "split rewrite",
+    )
+    for phrase in infra_phrases:
+        if phrase in lower:
+            return False, ""
+
+    # Skip commits that match granular/internal patterns regardless of other keywords
+    if SKIP_PATTERNS.search(first_line):
+        return False, ""
 
     if is_first:
         return True, "first commit in repo"
@@ -147,6 +220,9 @@ def is_notable(message: str, is_tagged: bool, is_first: bool) -> tuple[bool, str
     # "add" is too broad -- only match when it's the first word (after optional feat: prefix)
     stripped = re.sub(r"^feat:\s*", "", search_window, flags=re.IGNORECASE).strip()
     if re.match(r"(?i)^add\b", stripped):
+        # Extra guard: skip if it looks like an internal endpoint/service/flag addition
+        if SKIP_PATTERNS.search(first_line):
+            return False, ""
         return True, "keyword match"
 
     # For all other major keywords, match within the first 50 chars
